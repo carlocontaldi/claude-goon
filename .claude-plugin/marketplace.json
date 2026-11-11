@@ -1,0 +1,6 @@
+{
+  "name": "claude-goon",
+  "owner": { "name": "Carlo Contaldi" },
+  "metadata": { "description": "A Claude Code mod that tells interrupted sessions to go on once a usage limit resets." },
+  "plugins": [{ "name": "goon", "source": "./" }]
+}

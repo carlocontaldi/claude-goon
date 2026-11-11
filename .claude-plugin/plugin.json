@@ -1,0 +1,56 @@
+{
+  "name": "goon",
+  "version": "0.1.0",
+  "description": "Resumes the Claude Code sessions a usage limit interrupted, as soon as the limit resets.",
+  "author": { "name": "Carlo Contaldi" },
+  "license": "MIT",
+  "icon": "./.claude-plugin/icon.png",
+  "userConfig": {
+    "resume_text": {
+      "type": "string",
+      "title": "Resume message",
+      "description": "What Goon sends to an interrupted session once its limit has reset.",
+      "default": "Go on. The usage limit has reset: continue what you were doing.",
+      "required": false
+    },
+    "resume_permission_mode": {
+      "type": "string",
+      "title": "Permission mode for closed sessions",
+      "description": "acceptEdits, auto, dontAsk, plan or manual, for sessions Goon resumes headless after they were closed; unset uses your settings. A permission prompt pauses the run and Goon notifies you; it is never refused.",
+      "required": false
+    },
+    "skip_while_typing": {
+      "type": "boolean",
+      "title": "Wait while you are typing",
+      "description": "Do not continue an open session while its prompt box holds a draft; Goon checks again every 30 seconds.",
+      "default": true,
+      "required": false
+    },
+    "quiet_hours": {
+      "type": "string",
+      "title": "Quiet hours",
+      "description": "Optional. A daily window in which Goon resumes nothing, such as 22:00-07:00 (24 h, this machine's clock) or 22:00-07:00 Europe/Lisbon. A limit that resets inside it is acted on when the window ends. Empty is off.",
+      "required": false
+    },
+    "ntfy_topic": {
+      "type": "string",
+      "title": "ntfy topic",
+      "description": "Optional. A hard-to-guess topic; Goon pushes a one-line summary there when it resumes sessions.",
+      "required": false,
+      "sensitive": true
+    },
+    "notify_email": {
+      "type": "string",
+      "title": "Notification email",
+      "description": "Optional. Also have ntfy email the summary (needs the access token below).",
+      "required": false
+    },
+    "ntfy_token": {
+      "type": "string",
+      "title": "ntfy access token",
+      "description": "Optional. Needed only for the email; ntfy.sh refuses emails from anonymous requests.",
+      "required": false,
+      "sensitive": true
+    }
+  }
+}
