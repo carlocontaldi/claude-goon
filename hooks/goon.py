@@ -29,7 +29,6 @@ NTFY_URL = (os.environ.get('GOON_NTFY_URL') or 'https://ntfy.sh').rstrip('/') + 
 STAGGER = 15  # seconds between launches: each resume re-reads a whole conversation
 MAX_RESUMES = 4  # per session and day, so a session that keeps hitting a limit is not looped forever
 LOOKUP_TRIES = 10  # the limit error may not be in the transcript yet when the hook fires
-MAX_WAIT = timedelta(days=8)
 DEFAULT_RESUME_TEXT = 'go on'
 TOPIC_PREFIX = 'claude-goon'
 PROMPT_WAIT = 24 * 3600  # seconds a resumed session may sit on a permission prompt before its run is ended
@@ -304,7 +303,7 @@ def watch(payload: dict) -> None:
         logger.info('no limit message in transcript (error=%r)', payload.get('error'))
         return
     cap = limit.caps[0]
-    if cap.reset - datetime.now(timezone.utc) > MAX_WAIT:
+    if cap.reset - datetime.now(timezone.utc) > cap.max_wait:
         logger.info('unusable reset time %s for the %s', cap.reset, cap.label)
         return
     epoch = int(cap.reset.timestamp())

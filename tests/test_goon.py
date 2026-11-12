@@ -599,6 +599,29 @@ class WatchTest(WithFakeClaude):
         [(_, _, body)] = self.server.requests
         self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
 
+    def payload_resetting_in(self, days, **info):
+        payload = self.payload()
+        row = json.loads(Path(payload['transcript_path']).read_text())
+        reset = int((datetime.now(timezone.utc) + timedelta(days=days)).timestamp())
+        row['apiErrorParams']['rate_limit_info'].update(resetsAt=reset, overageResetsAt=reset, **info)
+        Path(payload['transcript_path']).write_text(json.dumps(row) + '\n')
+        return payload
+
+    @mock.patch.object(goon, 'sleep_until')
+    def test_a_window_reset_more_than_eight_days_off_is_logged_and_not_watched(self, sleep):
+        with self.assertLogs('goon', 'INFO') as logged:
+            goon.watch(self.payload_resetting_in(9))
+        self.assertIn('unusable reset time', '\n'.join(logged.output))
+        sleep.assert_not_called()
+        self.assertFalse(self.calls.exists())
+
+    @mock.patch.object(goon, 'sleep_until')
+    def test_a_monthly_spend_cap_is_waited_for_beyond_eight_days(self, sleep):
+        capped = {'rateLimitType': 'overage', 'overageDisabledReason': 'org_level_disabled_until'}
+        goon.watch(self.payload_resetting_in(20, **capped))
+        sleep.assert_called_once()
+        self.assertTrue(self.calls.exists())
+
     def test_an_open_session_is_not_resumed_and_is_reported(self):
         self.open_session()
         goon.watch(self.payload())
@@ -720,6 +743,17 @@ class ResetCommandTest(WithDirs):
         self.assertEqual(json.loads(out.getvalue())['resumeAt'], int(utc(2026, 10, 30, 7, 0).timestamp()))
 
     def test_it_prints_nothing_for_a_session_with_no_limit(self):
+        out = io.StringIO()
+        with mock.patch.object(sys, 'stdout', out), mock.patch.object(goon, 'LOOKUP_TRIES', 1):
+            goon.main(['reset', '--session', SESSION])
+        self.assertEqual(out.getvalue(), '')
+
+    def test_it_prints_nothing_when_a_newer_error_that_is_no_limit_followed_the_limit(self):
+        folder = self.claude / 'projects' / 'some-project'
+        folder.mkdir(parents=True)
+        now = datetime.now(timezone.utc)
+        rows = [limit_row(at=now, reset=1793324400), limit_row(at=now, text='API Error: overloaded')]
+        (folder / f'{SESSION}.jsonl').write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
         out = io.StringIO()
         with mock.patch.object(sys, 'stdout', out), mock.patch.object(goon, 'LOOKUP_TRIES', 1):
             goon.main(['reset', '--session', SESSION])

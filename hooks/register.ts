@@ -10,6 +10,7 @@ const USAGE = 'Use /goon on, /goon off, /goon status, /goon topic, /goon topic n
 let resumeText = 'go on'
 let quietHours = ''
 let topicOption = ''
+let tokenOption = ''
 let skipWhileTyping = true
 let timer: Timer | undefined
 let isWaitingForTyping = false
@@ -22,11 +23,14 @@ const disarm = async ($: EngineInterface, sessionId: string) => {
   await $.store.delete(KEY_PREFIX + sessionId)
 }
 
-// The script reads the topic option from its environment, as it does when a hook runs it.
+// The script reads these options from its environment, as it does when a hook runs it.
+const scriptEnv = () => ({
+  ...(topicOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: topicOption }),
+  ...(tokenOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_NTFY_TOKEN: tokenOption }),
+})
+
 const goonWith = ($: EngineInterface, args: string[]) =>
-  $.process.run(['python3', `${$.plugin.root}/hooks/goon.py`, ...args], {
-    env: topicOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: topicOption },
-  })
+  $.process.run(['python3', `${$.plugin.root}/hooks/goon.py`, ...args], { env: scriptEnv() })
 
 const goon = ($: EngineInterface, ...args: string[]) => goonWith($, args)
 
@@ -97,6 +101,7 @@ export const register: Register = (on, options) => {
   resumeText = String(options.resume_text || resumeText)
   quietHours = String(options.quiet_hours ?? '')
   topicOption = String(options.ntfy_topic ?? '').trim()
+  tokenOption = String(options.ntfy_token ?? '').trim()
   skipWhileTyping = options.skip_while_typing !== false
 
   on('session.start', async ($, e, next) => {

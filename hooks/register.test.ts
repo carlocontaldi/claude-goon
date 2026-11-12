@@ -285,3 +285,11 @@ test('a topic set in the options reaches the script', { options: { ntfy_topic: '
   await $.command.run(slash('topic'))
   expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: 'my-topic' })
 })
+
+test('the access token set in the options reaches the script, so /goon test is sent as the real pushes are', { options: { ntfy_token: ' tk_fake ' } }, async ($, on) => {
+  const { ran } = world(on, limit)
+  await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
+
+  await $.command.run(slash('test'))
+  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_NTFY_TOKEN: 'tk_fake' })
+})
