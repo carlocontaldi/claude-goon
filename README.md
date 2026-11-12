@@ -40,7 +40,7 @@ All seven values are optional.
 
 | Value | Meaning |
 |---|---|
-| Resume message | What an interrupted session is sent. Default: "Go on." |
+| Resume message | What an interrupted session is sent. Default: `go on`. |
 | Wait while you are typing | On by default. An open session is not continued while its prompt box holds a draft. Closed sessions have no prompt box, so it does not apply to them. |
 | Quiet hours | Off by default. A daily window such as `22:00-07:00` (24 h, this machine's clock) or `22:00-07:00 Europe/Lisbon`, in which nothing is resumed. A limit that resets inside it is acted on when the window ends, for open and closed sessions alike. An invalid window is logged and ignored. |
 | Permission mode for closed sessions | `acceptEdits`, `auto`, `dontAsk`, `plan` or `manual`, for headless resumes. Unset uses your settings, so a default mode of `bypassPermissions` there would apply to the unattended run. Anything else set here, `bypassPermissions` included, is ignored. |
@@ -48,7 +48,7 @@ All seven values are optional.
 | Notification email | Also have ntfy email the summary. |
 | ntfy access token | Needed only for the email: ntfy.sh refuses emails from anonymous requests. |
 
-A closed session that reaches a permission prompt is paused, not refused: Goon keeps the prompt open and pushes `A resumed session is waiting on a permission prompt for <tool>.` The run is ended after 24 hours. Answering the prompt from Goon is not built yet. With an email set, Goon sends one email per limit reset (and a second when a prompt is waiting); [Claude Portavoce](https://github.com/carlocontaldi/claude-portavoce) sends its own, and the free ntfy tier allows five emails a day.
+A closed session that reaches a permission prompt is paused, not refused: Goon keeps the prompt open and pushes `A resumed session is waiting on a permission prompt for <tool>.` The run is ended after 24 hours. Answering the prompt from Goon is not built yet. With an email set, Goon sends one email per limit reset and one more for each resumed session that reaches a prompt; [Claude Portavoce](https://github.com/carlocontaldi/claude-portavoce) sends its own, and the free ntfy tier allows five emails a day.
 
 What leaves your machine: one HTTPS request to ntfy.sh (or `GOON_NTFY_URL`) per reset, with the topic in the URL, your email and token in headers, and a one-line body of counts (or the tool's name, for a prompt). No project names, paths or session ids.
 
@@ -81,6 +81,7 @@ A session is resumed at most four times a day, so one that keeps hitting a limit
 - A headless resume loads the whole conversation again, as continuing by hand would. Several large sessions resumed together can use a lot of the window.
 - An open session without the mod loaded (started before the plugin was installed) is reported, not resumed.
 - A reboot or shutdown ends a pending watcher, and nothing re-arms it.
+- The watcher waits for a window limit up to 8 days and for a spend cap up to 35; a reset further off is logged and not watched.
 
 ## Test
 
