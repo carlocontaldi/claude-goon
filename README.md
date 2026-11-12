@@ -1,5 +1,12 @@
 # Claude Goon
 
+> **goon** · /ɡuːn/ (*GOON*) · *noun*, plural *goons*
+>
+> 1. A man hired to terrorize or eliminate opponents; a thug.
+> 2. A stupid person.
+>
+> *Probably short for English dialect* gooney, *a simpleton. Here the name also runs together* go on.
+
 A Claude Code plugin that tells interrupted sessions to go on. When a usage limit stops a session, Goon waits for the reset time the limit message states, then sends the session a resume message. The waiting costs no tokens; only the resumed turn does.
 
 Two halves share the work, so a session is brought back whether or not its window is still open:
