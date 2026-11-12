@@ -7,7 +7,7 @@ Two halves share the work, so a session is brought back whether or not its windo
 - **Open sessions.** A mod inside the session notices the limit, arms a timer for the reset time plus a minute, and submits the resume message into the same session and panel. If the prompt box holds a draft at that moment, it waits and checks again every 30 seconds. A newer turn (you, or the built-in `/rate-limit-options` wait) cancels it. The resume time is stored, so a session reopened before then is re-armed.
 - **Closed sessions.** A `StopFailure` hook starts a detached watcher per reset time. At reset plus a minute it checks each interrupted session: still ending in the limit error, and no running Claude Code process holding it. Those it resumes headless, one every 15 seconds, with `claude --resume <id>` over stream-json, in the session's own directory. Sessions already continued are left alone, and so are open ones, which belong to the mod inside them.
 
-If you set an ntfy topic, the watcher then pushes one line, such as `Limit reset: resumed 2 closed sessions, 1 open session left to the Goon mod inside.`
+The watcher then pushes one line to a private ntfy topic naming the limit, such as `5-hour limit reset: resumed 2 closed sessions, 1 open session left to the Goon mod inside.`
 
 Claude Code 2.1.319 also has a built-in wait (`/rate-limit-options`, "Wait here, then continue automatically"). It is per session, you choose it by hand each time, and the session has to stay open. Goon arms itself, and also covers sessions that were closed.
 
@@ -40,17 +40,33 @@ All seven values are optional.
 
 | Value | Meaning |
 |---|---|
-| Resume message | What an interrupted session is sent. Default: "Go on. The usage limit has reset: continue what you were doing." |
+| Resume message | What an interrupted session is sent. Default: "Go on." |
 | Wait while you are typing | On by default. An open session is not continued while its prompt box holds a draft. Closed sessions have no prompt box, so it does not apply to them. |
 | Quiet hours | Off by default. A daily window such as `22:00-07:00` (24 h, this machine's clock) or `22:00-07:00 Europe/Lisbon`, in which nothing is resumed. A limit that resets inside it is acted on when the window ends, for open and closed sessions alike. An invalid window is logged and ignored. |
-| Permission mode for closed sessions | `acceptEdits`, `auto`, `dontAsk`, `plan` or `manual`, for headless resumes. Unset uses your settings. Anything else, `bypassPermissions` included, is ignored. |
-| ntfy topic | A hard-to-guess topic; on the public server anyone who knows it can read and publish. No topic, no push. |
+| Permission mode for closed sessions | `acceptEdits`, `auto`, `dontAsk`, `plan` or `manual`, for headless resumes. Unset uses your settings, so a default mode of `bypassPermissions` there would apply to the unattended run. Anything else set here, `bypassPermissions` included, is ignored. |
+| ntfy topic | Optional. Empty: a private topic Goon makes, `claude-goon-<random>` (see below). Set a name to use your own. |
 | Notification email | Also have ntfy email the summary. |
 | ntfy access token | Needed only for the email: ntfy.sh refuses emails from anonymous requests. |
 
-A closed session that reaches a permission prompt is paused, not refused: Goon keeps the prompt open and, if a topic is set, pushes `A resumed session is waiting on a permission prompt for <tool>.` The run is ended after 24 hours. Answering the prompt from Goon is not built yet. With an email set, Goon sends one email per limit reset (and a second when a prompt is waiting); the credits-restored notifier sends its own, and the free ntfy tier allows five emails a day.
+A closed session that reaches a permission prompt is paused, not refused: Goon keeps the prompt open and pushes `A resumed session is waiting on a permission prompt for <tool>.` The run is ended after 24 hours. Answering the prompt from Goon is not built yet. With an email set, Goon sends one email per limit reset (and a second when a prompt is waiting); [Claude Portavoce](https://github.com/carlocontaldi/claude-portavoce) sends its own, and the free ntfy tier allows five emails a day.
 
-What leaves your machine: one HTTPS request to ntfy.sh (or `GOON_NTFY_URL`) per reset, with the topic in the URL, your email and token in headers, and a one-line body of counts. No project names, paths or session ids.
+What leaves your machine: one HTTPS request to ntfy.sh (or `GOON_NTFY_URL`) per reset, with the topic in the URL, your email and token in headers, and a one-line body of counts (or the tool's name, for a prompt). No project names, paths or session ids.
+
+## Set up ntfy
+
+1. **Phone.** In a Claude Code session run `/goon topic`. The first time, Goon makes a private topic, `claude-goon-` and 22 random letters and digits, keeps it in `~/.claude/goon/topic` (readable only by you) and shows it. Install the ntfy app (Android: Google Play or F-Droid; iOS: App Store), tap **+**, enter that topic and keep the default server, `ntfy.sh`. On Android, opening `ntfy://ntfy.sh/<topic>` subscribes in one step.
+2. **Try it.** `/goon test` sends one push to the topic, without an email, and says whether it went through.
+3. **Email (optional).** Needs a free [ntfy.sh account](https://ntfy.sh/app): create an access token under Account, then set the notification email and the token. The free tier allows 5 emails a day, shared with Portavoce if you use that too.
+
+`/goon topic new` makes another topic if the first one leaks (subscribe to it and drop the old one). A topic on the public server is readable and writable by anyone who knows its name, which is why the name is random and not a fixed one such as `claude-goon`. ntfy.sh [offers reserved topics with access control on paid plans](https://docs.ntfy.sh/terms/).
+
+Change a value from a shell; options you leave out keep their values:
+
+```
+claude plugin configure goon@claude-goon          # shows which are set
+echo '{"ntfy_topic": "my-own-topic"}' | claude plugin configure goon@claude-goon --values-stdin
+echo '{"ntfy_topic": ""}' | claude plugin configure goon@claude-goon --values-stdin     # back to the private topic
+```
 
 ## Check it
 
@@ -60,7 +76,7 @@ A session is resumed at most four times a day, so one that keeps hitting a limit
 
 ## Limits
 
-- Not yet seen on a real limit: that the VS Code panel delivers the `StopFailure` hook and a `turn.complete` with `reason: 'error'` for a usage-limit stop, and how the mod and the built-in wait interact when both are armed. A headless resume of a real session, and the plugin loading in a real session, were run; the rest is covered by tests against fake `claude` and ntfy.
+- Not yet seen on a real limit: that the VS Code panel delivers a `turn.complete` with `reason: 'error'` for a usage-limit stop, and how the mod and the built-in wait interact when both are armed. The `StopFailure` hook is known to fire on real 5-hour and weekly limits, which Portavoce relies on. A headless resume of a real session, and the plugin loading in a real session, were run; the rest is covered by tests against fake `claude` and ntfy.
 - A paused prompt cannot be answered yet: the session stays paused until its run is ended after 24 hours or you stop it.
 - A headless resume loads the whole conversation again, as continuing by hand would. Several large sessions resumed together can use a lot of the window.
 - An open session without the mod loaded (started before the plugin was installed) is reported, not resumed.
@@ -74,6 +90,8 @@ claude plugin test .
 ```
 
 ## Develop
+
+`hooks/limitwatch.py` is a copy of [claude-meridiana](https://github.com/carlocontaldi/claude-meridiana), which Portavoce shares; change it there and run its `sync.py`, not here. A test fails if the copy no longer matches its header.
 
 Run Claude Code with the clone as a plugin folder; the mod hot-reloads on save:
 
