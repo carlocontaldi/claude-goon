@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # setup-python has no 3.9 build for newer images
     strategy:
       matrix:
         python-version: ['3.9', '3.13']
