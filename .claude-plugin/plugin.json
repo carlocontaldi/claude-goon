@@ -1,9 +1,11 @@
 {
   "name": "goon",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Resumes the Claude Code sessions a usage limit interrupted, as soon as the limit resets.",
   "author": { "name": "Carlo Contaldi" },
   "license": "MIT",
+  "homepage": "https://github.com/carlocontaldi",
+  "repository": "https://github.com/carlocontaldi/claude-goon",
   "icon": "./.claude-plugin/icon.png",
   "userConfig": {
     "resume_text": {
