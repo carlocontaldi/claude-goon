@@ -10,7 +10,7 @@
       "type": "string",
       "title": "Resume message",
       "description": "What Goon sends to an interrupted session once its limit has reset.",
-      "default": "Go on. The usage limit has reset: continue what you were doing.",
+      "default": "go on",
       "required": false
     },
     "resume_permission_mode": {
@@ -35,7 +35,7 @@
     "ntfy_topic": {
       "type": "string",
       "title": "ntfy topic",
-      "description": "Optional. A hard-to-guess topic; Goon pushes a one-line summary there when it resumes sessions.",
+      "description": "Optional. Leave empty to push to a private topic Goon makes (claude-goon-<random>); run /goon topic to see it and subscribe the phone app. Set a name here to use your own.",
       "required": false,
       "sensitive": true
     },

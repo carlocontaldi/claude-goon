@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 const START = 1_800_000_000_000
 const RESET = START + 3_600_000
 const MARGIN = 60_000
-const TEXT = 'Go on. The usage limit has reset: continue what you were doing.'
+const TEXT = 'go on'
 const KEY = 'armed:sess-1'
 
 const stopped = { reason: 'error', answer: '', durationMs: 1, isAborted: false, turnId: 't1' } as const
@@ -26,10 +26,15 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
   on('store.keys', () => ({ value: [...store.keys()] }))
   const submitted: string[] = []
   const lookups: string[][] = []
+  const ran: { args: string[]; env?: Record<string, string> }[] = []
   on('session.id', () => ({ value: 'sess-1' }))
   on('process.run', async (_, e) => {
     const rest = e.argv.slice(2)
     const result = { stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+    if (rest[0] === 'topic' || rest[0] === 'test') {
+      ran.push({ args: rest, env: e.init?.env })
+      return { value: { ...result, exitCode: 0, stdout: `ran ${rest.join(' ')}\n` } }
+    }
     if (rest[0] === 'power') {
       if (power.isBroken) return { value: { ...result, exitCode: 1, stdout: '' } }
       if (rest[1] === 'on' || rest[1] === 'off') power.isOn = rest[1] === 'on'
@@ -50,7 +55,7 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
   on('turn.start', () => ({ turnId: 't2' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: 'sess-1' }))
-  return { clock, store, submitted, lookups, draft, power }
+  return { clock, store, submitted, lookups, draft, power, ran }
 }
 
 const reply = (resumeAt: number) => JSON.stringify({ resetAt: RESET / 1000, resumeAt: resumeAt / 1000, window: 'five_hour' })
@@ -256,6 +261,27 @@ test('/goon with anything else says how to use it and changes nothing', async ($
   const { power } = world(on, limit)
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
-  expect((await $.command.run(slash('maybe'))).text).toBe('Use /goon on, /goon off or /goon status.')
+  expect((await $.command.run(slash('maybe'))).text).toBe(
+    'Use /goon on, /goon off, /goon status, /goon topic, /goon topic new or /goon test.',
+  )
   expect(power.isOn).toBe(true)
+})
+
+test('/goon topic, topic new and test run the script and show what it says', async ($, on) => {
+  const { ran } = world(on, limit)
+  await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
+
+  expect((await $.command.run(slash('topic'))).text).toBe('ran topic')
+  expect((await $.command.run(slash('topic new'))).text).toBe('ran topic new')
+  expect((await $.command.run(slash(' test '))).text).toBe('ran test')
+  expect(ran.map(run => run.args)).toEqual([['topic'], ['topic', 'new'], ['test']])
+  expect(ran[0]?.env).toEqual({})
+})
+
+test('a topic set in the options reaches the script', { options: { ntfy_topic: ' my-topic ' } }, async ($, on) => {
+  const { ran } = world(on, limit)
+  await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
+
+  await $.command.run(slash('topic'))
+  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: 'my-topic' })
 })

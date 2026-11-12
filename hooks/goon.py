@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
-import http.client
 import json
 import logging
 import os
@@ -14,75 +12,65 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from goon_limits import Limit, find_limit, is_blocked, is_open
+from goon_limits import is_blocked, is_open
 from goon_quiet import after_quiet, parse_quiet
+from limitwatch import MARGIN, claim, effective_topic, lookup, release, sleep_until, stored_topic, subscribe_steps
+from limitwatch import push as ntfy_push
 
 logger = logging.getLogger('goon')
 
 CLAUDE_DIR = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude')
 DIR = Path(os.environ.get('GOON_DIR') or CLAUDE_DIR / 'goon')
 NTFY_URL = (os.environ.get('GOON_NTFY_URL') or 'https://ntfy.sh').rstrip('/') + '/'
-MARGIN = timedelta(seconds=60)  # pad past the stated time so nothing starts before the limit has lifted
 STAGGER = 15  # seconds between launches: each resume re-reads a whole conversation
 MAX_RESUMES = 4  # per session and day, so a session that keeps hitting a limit is not looped forever
 LOOKUP_TRIES = 10  # the limit error may not be in the transcript yet when the hook fires
 MAX_WAIT = timedelta(days=8)
-DEFAULT_RESUME_TEXT = 'Go on.'
+DEFAULT_RESUME_TEXT = 'go on'
+TOPIC_PREFIX = 'claude-goon'
 PROMPT_WAIT = 24 * 3600  # seconds a resumed session may sit on a permission prompt before its run is ended
 PERMISSION_MODES = ('acceptEdits', 'auto', 'dontAsk', 'plan', 'manual')  # never bypassPermissions
 OFF_EXIT = 3  # `power` exit code while off; 1 and 2 are a crash and a usage error. register.ts holds a copy
 
 
-def claim(marker: Path) -> int | None:
-    """Lock the marker for one reset time and return its fd; None if a live watcher holds it."""
-    while True:
-        fd = os.open(marker, os.O_CREAT | os.O_WRONLY, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(fd)
-            return None
-        try:
-            if os.fstat(fd).st_ino == marker.stat().st_ino:
-                return fd
-        except FileNotFoundError:
-            pass
-        os.close(fd)  # the previous holder deleted the file after we opened it; try again
-
-
-def release(fd: int, marker: Path) -> None:
-    marker.unlink(missing_ok=True)  # while still locked, so a waiting claim() sees the file gone
-    os.close(fd)
-
-
-def sleep_until(t: datetime) -> None:
-    while (left := (t - datetime.now(timezone.utc)).total_seconds()) > 0:
-        time.sleep(min(left, 60))  # re-check the wall clock so a clock jump cannot oversleep
-
-
 def register(epoch: int, payload: dict) -> None:
     """Record the interrupted session under its reset time for that reset's watcher."""
     folder = DIR / 'pending' / str(epoch)
-    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     record = {'session_id': payload['session_id'], 'cwd': payload['cwd'], 'transcript_path': payload['transcript_path']}
     target = folder / f'{payload["session_id"]}.json'
     scratch = target.with_suffix('.tmp')
-    scratch.write_text(json.dumps(record))
+    for _ in range(2):  # a finishing watcher may remove the empty folder between our mkdir and our write
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            scratch.write_text(json.dumps(record))
+            break
+        except FileNotFoundError:
+            continue
     scratch.replace(target)
 
 
+def has_pending(epoch: int) -> bool:
+    return any((DIR / 'pending' / str(epoch)).glob('*.json'))
+
+
 def take_pending(epoch: int) -> list[dict]:
+    """Remove and return the sessions registered for this reset; an unreadable record is dropped and logged."""
+    folder = DIR / 'pending' / str(epoch)
     records = []
-    for entry in sorted((DIR / 'pending' / str(epoch)).glob('*.json')):
-        records.append(json.loads(entry.read_text()))
+    for entry in sorted(folder.glob('*.json')):
+        try:
+            records.append(json.loads(entry.read_text()))
+        except ValueError:
+            logger.info('dropping an unreadable pending record %s', entry.name[:8])
         entry.unlink()
+    try:
+        folder.rmdir()
+    except OSError:
+        pass  # missing, or a session registered meanwhile
     return records
 
 
@@ -120,7 +108,9 @@ def claude_binary() -> str | None:
 
 def read_settings() -> dict[str, str]:
     names = ('resume_text', 'resume_permission_mode', 'quiet_hours', 'ntfy_topic', 'notify_email', 'ntfy_token')
-    return {n: os.environ.get(f'CLAUDE_PLUGIN_OPTION_{n.upper()}', '').strip() for n in names}
+    settings = {n: os.environ.get(f'CLAUDE_PLUGIN_OPTION_{n.upper()}', '').strip() for n in names}
+    settings['ntfy_topic'] = effective_topic(settings['ntfy_topic'], DIR / 'topic', TOPIC_PREFIX)
+    return settings
 
 
 def resume_argv(binary: str, session_id: str, settings: dict[str, str]) -> list[str]:
@@ -217,9 +207,11 @@ def resume_one(record: dict, epoch: int, pause: int) -> str:
     """Return the outcome for one pending session; an error in it is logged and becomes 'failed'."""
     try:
         outcome = decide(record)
+        if outcome == 'resume' and pause:
+            time.sleep(pause)
+            outcome = decide(record)  # the person may have opened the session while it waited its turn
         if outcome != 'resume':
             return outcome
-        time.sleep(pause)
         return launch(record, epoch)
     except Exception:
         logger.exception('%s: failed', record['session_id'][:8])
@@ -255,8 +247,8 @@ def count(n: int, noun: str) -> str:
     return f'{n} {noun}' if n == 1 else f'{n} {noun}s'
 
 
-def summary(outcomes: Counter) -> str | None:
-    """One line saying what Goon did, or None when every session had already been continued."""
+def summary(outcomes: Counter, label: str) -> str | None:
+    """One line saying which limit reset and what Goon did, or None when every session had already continued."""
     parts = []
     if outcomes['resumed']:
         parts.append(f'resumed {count(outcomes["resumed"], "closed session")}')
@@ -265,54 +257,45 @@ def summary(outcomes: Counter) -> str | None:
     skipped = sum(n for label, n in outcomes.items() if label not in ('resumed', 'open', 'continued', 'off'))
     if skipped:
         parts.append(f'{skipped} skipped, see the log')
-    return f'Limit reset: {", ".join(parts)}.' if parts else None
-
-
-def is_permanent(error: Exception) -> bool:
-    """A bad URL or header, or a 4xx other than 429, fails the same way every time."""
-    if isinstance(error, urllib.error.HTTPError):
-        return 400 <= error.code < 500 and error.code != 429
-    return isinstance(error, (ValueError, http.client.InvalidURL))
-
-
-def describe(error: Exception) -> str:
-    """Class (and HTTP status) only: an error message can quote the topic or the token."""
-    return f'HTTP {error.code}' if isinstance(error, urllib.error.HTTPError) else type(error).__name__
+    return f'{label[0].upper()}{label[1:]} reset: {", ".join(parts)}.' if parts else None
 
 
 def push(text: str, settings: dict[str, str]) -> None:
-    if not settings['ntfy_topic']:
-        return
-    headers = {'Title': 'Claude Goon', 'Tags': 'arrow_forward'}
-    if settings['notify_email']:
-        headers['Email'] = settings['notify_email']
-    if settings['ntfy_token']:
-        headers['Authorization'] = f'Bearer {settings["ntfy_token"]}'  # ntfy.sh refuses anonymous email
-    request = urllib.request.Request(
-        NTFY_URL + urllib.parse.quote(settings['ntfy_topic'], safe=''), data=text.encode(), headers=headers
+    ntfy_push(
+        NTFY_URL,
+        settings['ntfy_topic'],
+        text,
+        logger.info,
+        title='Claude Goon',
+        tags='arrow_forward',
+        email=settings['notify_email'],
+        token=settings['ntfy_token'],
     )
-    for attempt in range(1, 4):
-        try:
-            urllib.request.urlopen(request, timeout=15).read()
-            logger.info('pushed (attempt %d)', attempt)
-            return
-        except (OSError, ValueError, http.client.HTTPException) as e:
-            logger.info('push failed (attempt %d): %s', attempt, describe(e))
-            if is_permanent(e):
-                break
-            time.sleep(30)
-    logger.info('gave up pushing')
 
 
-def lookup(path: str | None, tries: int) -> Limit | None:
-    if not path:
-        return None
-    for attempt in range(tries):
-        limit = find_limit(Path(path), datetime.now(timezone.utc))
-        if limit or attempt == tries - 1:
-            return limit
-        time.sleep(1)
-    return None
+def topic_text(rotate: bool = False) -> str:
+    """What `/goon topic` says: the topic pushes go to and how to subscribe the phone to it."""
+    option = os.environ.get('CLAUDE_PLUGIN_OPTION_NTFY_TOPIC', '').strip()
+    if option:
+        note = 'The topic option is set, so that is the topic; clear the option to use a private one made here.'
+        return f'Goon pushes to {option}. {note} {subscribe_steps(option, "/goon test")}'
+    topic = stored_topic(DIR / 'topic', TOPIC_PREFIX, rotate=rotate)
+    made = 'Made a new private topic, so drop the old one in the app. ' if rotate else ''
+    return f'{made}Goon pushes to your private ntfy topic {topic}. {subscribe_steps(topic, "/goon test")}'
+
+
+def send_test(settings: dict[str, str]) -> str:
+    """Sends one push to the topic, without the email, and says whether it went through."""
+    sent = ntfy_push(
+        NTFY_URL,
+        settings['ntfy_topic'],
+        'Claude Goon test: if you can read this, the topic works.',
+        logger.info,
+        title='Claude Goon test',
+        tags='bell',
+        token=settings['ntfy_token'],
+    )
+    return 'Sent: it should show up in the ntfy app now.' if sent else f'Not sent; {DIR / "log.txt"} says why.'
 
 
 def watch(payload: dict) -> None:
@@ -320,31 +303,32 @@ def watch(payload: dict) -> None:
     if limit is None:
         logger.info('no limit message in transcript (error=%r)', payload.get('error'))
         return
-    if limit.reset - datetime.now(timezone.utc) > MAX_WAIT:
-        logger.info('unusable reset time %s', limit.reset)
+    cap = limit.caps[0]
+    if cap.reset - datetime.now(timezone.utc) > MAX_WAIT:
+        logger.info('unusable reset time %s for the %s', cap.reset, cap.label)
         return
-    epoch = int(limit.reset.timestamp())
+    epoch = int(cap.reset.timestamp())
     register(epoch, payload)
     marker = DIR / f'{epoch}.lock'
     fd = claim(marker)
     if fd is None:
-        logger.info('already watching the %s reset', limit.reset.strftime('%Y-%m-%d %H:%M'))
+        logger.info('already watching the %s reset', cap.reset.strftime('%Y-%m-%d %H:%M'))
         return
     settings = read_settings()
     if settings['quiet_hours'] and parse_quiet(settings['quiet_hours']) is None:
         logger.info('ignoring quiet hours %r: not HH:MM-HH:MM', settings['quiet_hours'])
-    resume_at = after_quiet(limit.reset + MARGIN, settings['quiet_hours'])
-    try:
-        logger.info(
-            '%s limit; will resume at %s',
-            limit.window,
-            resume_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-        )
-        sleep_until(resume_at)
-        outcomes = resume_all(epoch)
-    finally:
-        release(fd, marker)
-    if text := summary(outcomes):
+    resume_at = after_quiet(cap.reset + MARGIN, settings['quiet_hours'])
+    logger.info('%s; will resume at %s', cap.label, resume_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
+    outcomes: Counter = Counter()
+    while fd is not None:
+        try:
+            sleep_until(resume_at)
+            outcomes += resume_all(epoch)
+        finally:
+            release(fd, marker)
+        # A session registered after our last look found the lock held and left it to us.
+        fd = claim(marker) if has_pending(epoch) else None
+    if text := summary(outcomes, cap.label):
         push(text, settings)
 
 
@@ -404,8 +388,8 @@ def configure_logging() -> None:
 
 def main(argv: list[str]) -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('mode', nargs='?', choices=['watch', 'reset', 'run', 'power'])
-    parser.add_argument('word', nargs='?', choices=['on', 'off', 'status'], default='status')
+    parser.add_argument('mode', nargs='?', choices=['watch', 'reset', 'run', 'power', 'topic', 'test'])
+    parser.add_argument('word', nargs='?', choices=['on', 'off', 'status', 'new'], default='status')
     parser.add_argument('--session')
     parser.add_argument('--quiet', default='')
     args = parser.parse_args(argv)
@@ -416,7 +400,11 @@ def main(argv: list[str]) -> None:
     if args.mode == 'power':
         print(power(args.word))
         sys.exit(0 if is_enabled() else OFF_EXIT)  # the in-session mod reads the switch from this
-    if args.mode == 'reset':
+    if args.mode == 'topic':
+        print(topic_text(rotate=args.word == 'new'))
+    elif args.mode == 'test':
+        print(send_test(read_settings()))
+    elif args.mode == 'reset':
         print_reset(args.session, args.quiet)
     elif args.mode in ('watch', 'run'):
         try:

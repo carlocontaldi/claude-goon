@@ -5,9 +5,11 @@ const TYPING_RECHECK_MS = 30_000
 const KEY_PREFIX = 'armed:'
 const OFF_EXIT = 3 // goon.py's exit code for "switched off"; any other failure is a crash
 const RETRY_MS = 60_000
+const USAGE = 'Use /goon on, /goon off, /goon status, /goon topic, /goon topic new or /goon test.'
 
-let resumeText = 'Go on.'
+let resumeText = 'go on'
 let quietHours = ''
+let topicOption = ''
 let skipWhileTyping = true
 let timer: Timer | undefined
 let isWaitingForTyping = false
@@ -20,7 +22,13 @@ const disarm = async ($: EngineInterface, sessionId: string) => {
   await $.store.delete(KEY_PREFIX + sessionId)
 }
 
-const goon = ($: EngineInterface, ...args: string[]) => $.process.run(['python3', `${$.plugin.root}/hooks/goon.py`, ...args])
+// The script reads the topic option from its environment, as it does when a hook runs it.
+const goonWith = ($: EngineInterface, args: string[]) =>
+  $.process.run(['python3', `${$.plugin.root}/hooks/goon.py`, ...args], {
+    env: topicOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: topicOption },
+  })
+
+const goon = ($: EngineInterface, ...args: string[]) => goonWith($, args)
 
 // goon.py reads the transcript's limit error and the quiet hours: one parser for both halves.
 const resumeAt = async ($: EngineInterface, sessionId: string) => {
@@ -88,18 +96,25 @@ const restore = async ($: EngineInterface) => {
 export const register: Register = (on, options) => {
   resumeText = String(options.resume_text || resumeText)
   quietHours = String(options.quiet_hours ?? '')
+  topicOption = String(options.ntfy_topic ?? '').trim()
   skipWhileTyping = options.skip_while_typing !== false
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'goon', description: 'Turn Goon on or off', argumentHint: 'on|off|status' })
+    await $.command.register({
+      name: 'goon',
+      description: 'Turn Goon on or off, or set up its ntfy topic',
+      argumentHint: 'on|off|status|topic|topic new|test',
+    })
     const started = await next(e)
     void restore($).catch(error => $.ui.log(`goon: restore failed: ${error}`, { to: 'debug' }))
     return started
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'goon' }, async ($, e) => {
-    const word = e.args.trim()
-    if (!['on', 'off', 'status', ''].includes(word)) return { text: 'Use /goon on, /goon off or /goon status.' }
+    const words = e.args.trim().split(/\s+/).filter(Boolean)
+    const word = words.join(' ')
+    if (['topic', 'topic new', 'test'].includes(word)) return { text: (await goonWith($, words)).stdout.trim() }
+    if (!['on', 'off', 'status', ''].includes(word)) return { text: USAGE }
     return { text: (await goon($, 'power', word || 'status')).stdout.trim() }
   })
 

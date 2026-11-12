@@ -1,7 +1,9 @@
+import hashlib
 import http.server
 import io
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -12,10 +14,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'hooks'))
+HOOKS = Path(__file__).resolve().parent.parent / 'hooks'
+sys.path.insert(0, str(HOOKS))
 import goon  # noqa: E402
 import goon_limits as limits  # noqa: E402
 import goon_quiet as quiet  # noqa: E402
+import limitwatch as lw  # noqa: E402
 
 NOW = datetime(2026, 10, 29, 21, 40, tzinfo=timezone.utc)
 SESSION = '11111111-2222-3333-4444-555555555555'
@@ -67,66 +71,12 @@ class WithDirs(unittest.TestCase):
         path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
         return path
 
-    def open_session(self, session_id=SESSION, pid=None):
-        entry = {'sessionId': session_id, 'pid': os.getpid() if pid is None else pid}
+    def open_session(self, session_id=SESSION, pid=None, **extra):
+        entry = {'sessionId': session_id, 'pid': os.getpid() if pid is None else pid, **extra}
         (self.claude / 'sessions' / f'{entry["pid"]}.json').write_text(json.dumps(entry))
 
     def record(self, path, session_id=SESSION):
         return {'session_id': session_id, 'cwd': str(self.cwd), 'transcript_path': str(path)}
-
-
-class ParseResetTest(unittest.TestCase):
-    def test_a_time_later_today_is_today(self):
-        at = datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc)
-        self.assertEqual(
-            limits.parse_reset('resets 2:20pm (UTC)', at), datetime(2026, 10, 20, 14, 20, tzinfo=timezone.utc)
-        )
-
-    def test_a_time_already_past_is_tomorrow(self):
-        at = datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc)
-        self.assertEqual(limits.parse_reset('resets 9am (UTC)', at), datetime(2026, 10, 21, 9, 0, tzinfo=timezone.utc))
-
-    def test_a_dated_reset_in_another_zone_is_converted_to_utc(self):
-        at = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
-        self.assertEqual(
-            limits.parse_reset('resets Oct 6, 3am (Europe/Lisbon)', at),
-            datetime(2026, 10, 6, 2, 0, tzinfo=timezone.utc),
-        )
-
-    def test_an_unknown_zone_or_no_time_is_none(self):
-        self.assertIsNone(limits.parse_reset('resets 9am (Mars/Base)', NOW))
-        self.assertIsNone(limits.parse_reset('Failed to authenticate', NOW))
-
-
-class LimitOfTest(unittest.TestCase):
-    def test_the_structured_reset_wins_over_the_text(self):
-        limit = limits.limit_of(limit_row(reset=1793324400, text='resets 9pm (UTC)'))
-        self.assertEqual(limit.reset, datetime(2026, 10, 30, 1, 40, tzinfo=timezone.utc))
-        self.assertEqual(limit.window, 'five_hour')
-
-    def test_a_row_with_only_text_is_read_from_the_text(self):
-        limit = limits.limit_of(limit_row(text="You've hit your session limit · resets 7:20pm (UTC)"))
-        self.assertEqual(limit.reset, datetime(2026, 10, 30, 19, 20, tzinfo=timezone.utc))
-        self.assertEqual(limit.window, 'session')
-
-    def test_an_error_without_a_reset_is_not_a_limit(self):
-        self.assertIsNone(limits.limit_of(limit_row(text='Failed to authenticate: OAuth session expired')))
-
-    def test_a_normal_message_is_not_a_limit(self):
-        self.assertIsNone(limits.limit_of(chat_row()))
-
-
-class FindLimitTest(WithDirs):
-    def test_the_newest_limit_error_is_found(self):
-        path = self.transcript(limit_row(at=NOW - timedelta(minutes=3), reset=100), limit_row(reset=200))
-        self.assertEqual(limits.find_limit(path, NOW + timedelta(seconds=5)).reset.timestamp(), 200)
-
-    def test_an_old_error_is_ignored(self):
-        path = self.transcript(limit_row(at=NOW - timedelta(hours=1), reset=100))
-        self.assertIsNone(limits.find_limit(path, NOW))
-
-    def test_a_missing_transcript_is_none(self):
-        self.assertIsNone(limits.find_limit(self.root / 'nope.jsonl', NOW))
 
 
 class IsBlockedTest(WithDirs):
@@ -153,6 +103,17 @@ class IsOpenTest(WithDirs):
         self.open_session(pid=2**22 + 1)
         self.assertFalse(limits.is_open(SESSION, self.claude / 'sessions'))
 
+    @unittest.skipUnless(Path('/proc/self/stat').exists(), 'needs /proc')
+    def test_the_process_that_started_the_session_is_recognised_by_its_start_time(self):
+        started = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
+        self.open_session(procStart=started)
+        self.assertTrue(limits.is_open(SESSION, self.claude / 'sessions'))
+
+    @unittest.skipUnless(Path('/proc/self/stat').exists(), 'needs /proc')
+    def test_a_pid_reused_by_another_process_is_not_the_session(self):
+        self.open_session(procStart='1')
+        self.assertFalse(limits.is_open(SESSION, self.claude / 'sessions'))
+
     def test_another_session_does_not_count(self):
         self.open_session(session_id='other')
         self.assertFalse(limits.is_open(SESSION, self.claude / 'sessions'))
@@ -169,6 +130,34 @@ class PendingTest(WithDirs):
 
     def test_a_reset_nobody_registered_for_has_none(self):
         self.assertEqual(goon.take_pending(7), [])
+
+    def test_the_folder_of_a_reset_is_removed_once_taken(self):
+        goon.register(100, self.record(Path('t.jsonl')))
+        goon.take_pending(100)
+        self.assertFalse((self.dir / 'pending' / '100').exists())
+
+    def test_an_unreadable_record_is_dropped_and_the_others_are_still_taken(self):
+        goon.register(100, self.record(Path('t.jsonl')))
+        (self.dir / 'pending' / '100' / 'bad.json').write_text('{"session_id": ')
+        with self.assertLogs('goon', 'INFO') as logged:
+            records = goon.take_pending(100)
+        self.assertEqual([r['session_id'] for r in records], [SESSION])
+        self.assertIn('dropping an unreadable pending record bad.json', '\n'.join(logged.output))
+        self.assertFalse(goon.has_pending(100))
+
+    def test_registering_survives_the_folder_being_removed_underneath(self):
+        real_write = Path.write_text
+        calls = []
+
+        def write_after_a_rmdir(path, *args, **kwargs):
+            if path.suffix == '.tmp' and not calls:
+                calls.append(1)
+                (self.dir / 'pending' / '100').rmdir()
+            return real_write(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'write_text', write_after_a_rmdir):
+            goon.register(100, self.record(Path('t.jsonl')))
+        self.assertTrue(goon.has_pending(100))
 
 
 class AllowResumeTest(WithDirs):
@@ -197,6 +186,17 @@ class ResumeAllTest(WithDirs):
                 with self.assertLogs('goon', 'ERROR'):
                     outcomes = goon.resume_all(100)
         self.assertEqual(outcomes, Counter(failed=1, resumed=1))
+
+    def test_a_session_opened_while_it_waited_its_turn_is_left_alone(self):
+        goon.register(100, self.record(Path('a.jsonl'), 'a' * 36))
+        goon.register(100, self.record(Path('b.jsonl'), 'b' * 36))
+        with mock.patch.object(goon, 'STAGGER', 15), mock.patch.object(goon.time, 'sleep') as sleep:
+            with mock.patch.object(goon, 'decide', side_effect=['resume', 'resume', 'open']):
+                with mock.patch.object(goon, 'launch', return_value='resumed') as launch:
+                    outcomes = goon.resume_all(100)
+        sleep.assert_called_once_with(15)
+        launch.assert_called_once()
+        self.assertEqual(outcomes, Counter(resumed=1, open=1))
 
 
 class ResumeArgvTest(unittest.TestCase):
@@ -246,18 +246,23 @@ class DecideTest(WithDirs):
 class SummaryTest(unittest.TestCase):
     def test_closed_and_open_sessions_are_counted(self):
         self.assertEqual(
-            goon.summary(Counter(resumed=2, open=1)),
-            'Limit reset: resumed 2 closed sessions, 1 open session left to the Goon mod inside.',
+            goon.summary(Counter(resumed=2, open=1), '5-hour limit'),
+            '5-hour limit reset: resumed 2 closed sessions, 1 open session left to the Goon mod inside.',
         )
 
     def test_skipped_sessions_are_pointed_at_the_log(self):
         self.assertEqual(
-            goon.summary(Counter(resumed=1, **{'gave-up': 2})),
-            'Limit reset: resumed 1 closed session, 2 skipped, see the log.',
+            goon.summary(Counter(resumed=1, **{'gave-up': 2}), 'weekly limit'),
+            'Weekly limit reset: resumed 1 closed session, 2 skipped, see the log.',
+        )
+
+    def test_the_limit_is_named_as_claude_names_it(self):
+        self.assertEqual(
+            goon.summary(Counter(resumed=1), 'Fable limit'), 'Fable limit reset: resumed 1 closed session.'
         )
 
     def test_nothing_to_say_when_everyone_continued_on_their_own(self):
-        self.assertIsNone(goon.summary(Counter(continued=3)))
+        self.assertIsNone(goon.summary(Counter(continued=3), '5-hour limit'))
 
 
 def utc(*args):
@@ -295,6 +300,104 @@ class AfterQuietTest(unittest.TestCase):
             self.assertEqual(quiet.after_quiet(t, spec), t, spec)
 
 
+class SettingsTest(WithDirs):
+    MANIFEST = json.loads((HOOKS.parent / '.claude-plugin' / 'plugin.json').read_text())['userConfig']
+
+    def test_an_unset_or_empty_topic_option_gets_a_private_topic_that_is_kept(self):
+        for value in (None, ''):
+            with mock.patch.dict(os.environ):
+                os.environ.pop('CLAUDE_PLUGIN_OPTION_NTFY_TOPIC', None)
+                if value is not None:
+                    os.environ['CLAUDE_PLUGIN_OPTION_NTFY_TOPIC'] = value
+                topic = goon.read_settings()['ntfy_topic']
+            self.assertRegex(topic, r'^claude-goon-[A-Za-z0-9]{22}$')
+            self.assertEqual((self.dir / 'topic').read_text().strip(), topic)
+
+    def test_a_topic_set_in_the_options_wins_and_makes_no_private_one(self):
+        with mock.patch.dict(os.environ, {'CLAUDE_PLUGIN_OPTION_NTFY_TOPIC': ' mine '}):
+            self.assertEqual(goon.read_settings()['ntfy_topic'], 'mine')
+        self.assertFalse((self.dir / 'topic').exists())
+
+    def test_the_resume_text_default_is_the_one_the_manifest_declares(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop('CLAUDE_PLUGIN_OPTION_RESUME_TEXT', None)
+            self.assertEqual(goon.read_settings()['resume_text'] or goon.DEFAULT_RESUME_TEXT, 'go on')
+        self.assertEqual(self.MANIFEST['resume_text']['default'], goon.DEFAULT_RESUME_TEXT)
+
+    def test_the_manifest_has_no_fixed_topic(self):
+        self.assertNotIn('default', self.MANIFEST['ntfy_topic'])
+
+
+class TopicCommandTest(WithDirs):
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop('CLAUDE_PLUGIN_OPTION_NTFY_TOPIC', None)
+
+    def test_the_topic_is_shown_with_how_to_subscribe_and_stays_the_same(self):
+        text = goon.topic_text()
+        topic = (self.dir / 'topic').read_text().strip()
+        self.assertIn(f'Goon pushes to your private ntfy topic {topic}.', text)
+        self.assertIn('tap +', text)
+        self.assertIn(f'ntfy://ntfy.sh/{topic}', text)
+        self.assertTrue(text.endswith('Then run /goon test.'))
+        self.assertEqual(goon.topic_text(), text)
+
+    def test_topic_new_makes_another_and_says_to_drop_the_old_one(self):
+        old = goon.topic_text()
+        new = goon.topic_text(rotate=True)
+        self.assertNotEqual(old, new)
+        self.assertTrue(new.startswith('Made a new private topic, so drop the old one in the app.'))
+
+    def test_a_topic_from_the_options_is_shown_as_such_and_not_changed(self):
+        os.environ['CLAUDE_PLUGIN_OPTION_NTFY_TOPIC'] = 'mine'
+        self.assertIn('Goon pushes to mine. The topic option is set', goon.topic_text(rotate=True))
+        self.assertFalse((self.dir / 'topic').exists())
+
+    def test_main_prints_the_topic_text(self):
+        out = io.StringIO()
+        with mock.patch.object(sys, 'stdout', out):
+            goon.main(['topic'])
+        self.assertIn('private ntfy topic', out.getvalue())
+
+    def test_main_rotates_on_topic_new(self):
+        with mock.patch.object(sys, 'stdout', io.StringIO()):
+            goon.main(['topic'])
+            old = (self.dir / 'topic').read_text()
+            goon.main(['topic', 'new'])
+        self.assertNotEqual((self.dir / 'topic').read_text(), old)
+
+
+class SendTestTest(WithDirs):
+    def setUp(self):
+        super().setUp()
+        self.server = FakeNtfy()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        patcher = mock.patch.object(goon, 'NTFY_URL', f'http://127.0.0.1:{self.server.server_port}/')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.settings = {'ntfy_topic': 'secret-topic', 'notify_email': 'me@example.com', 'ntfy_token': ''}
+
+    def test_one_push_goes_to_the_topic_without_the_email(self):
+        text = goon.send_test(self.settings)
+        self.assertEqual(text, 'Sent: it should show up in the ntfy app now.')
+        [(path, headers, body)] = self.server.requests
+        self.assertEqual(path, '/secret-topic')
+        self.assertNotIn('Email', headers)
+        self.assertEqual(headers['Title'], 'Claude Goon test')
+        self.assertIn(b'the topic works', body)
+
+    def test_a_failure_points_at_the_log(self):
+        self.server.shutdown()
+        self.server.server_close()
+        with mock.patch('time.sleep'):
+            text = goon.send_test(self.settings)
+        self.assertTrue(text.startswith('Not sent;'))
+
+
 class PowerTest(WithDirs):
     def test_goon_is_on_until_switched_off(self):
         self.assertTrue(goon.is_enabled())
@@ -318,7 +421,7 @@ class PowerTest(WithDirs):
         self.assertEqual(goon.decide(self.record(self.transcript(limit_row()))), 'off')
 
     def test_nothing_is_said_about_sessions_left_while_off(self):
-        self.assertIsNone(goon.summary(Counter(off=2)))
+        self.assertIsNone(goon.summary(Counter(off=2), '5-hour limit'))
 
 
 class FakeNtfy(http.server.ThreadingHTTPServer):
@@ -438,25 +541,25 @@ class WatchTest(WithFakeClaude):
         [(path, headers, body)] = self.server.requests
         self.assertEqual(path, '/secret-topic')
         self.assertEqual(headers['Title'], 'Claude Goon')
-        self.assertEqual(body, b'Limit reset: resumed 1 closed session.')
+        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
         self.assertEqual([p.name for p in self.dir.glob('*.lock')], [])
 
     def test_one_watcher_resumes_every_session_registered_for_its_reset(self):
         first = self.payload()
         second = self.payload('99999999-2222-3333-4444-555555555555')
         goon.register(
-            int(limits.find_limit(Path(second['transcript_path']), datetime.now(timezone.utc)).reset.timestamp()),
+            int(lw.find_limit(Path(second['transcript_path']), datetime.now(timezone.utc)).reset.timestamp()),
             second,
         )
         goon.watch(first)
         [(_, _, body)] = self.server.requests
-        self.assertEqual(body, b'Limit reset: resumed 2 closed sessions.')
+        self.assertEqual(body, b'5-hour limit reset: resumed 2 closed sessions.')
 
     def test_launches_are_spaced_by_the_stagger(self):
         first = self.payload()
         second = self.payload('99999999-2222-3333-4444-555555555555')
         goon.register(
-            int(limits.find_limit(Path(second['transcript_path']), datetime.now(timezone.utc)).reset.timestamp()),
+            int(lw.find_limit(Path(second['transcript_path']), datetime.now(timezone.utc)).reset.timestamp()),
             second,
         )
         real_sleep = goon.time.sleep
@@ -465,12 +568,43 @@ class WatchTest(WithFakeClaude):
                 goon.watch(first)
         self.assertEqual(sleep.call_args_list.count(mock.call(7)), 1)
 
+    def test_a_session_registered_after_the_last_look_is_still_resumed(self):
+        late = self.payload('99999999-2222-3333-4444-555555555555')
+        real, calls = goon.resume_all, []
+
+        def resume_all(epoch):
+            outcomes = real(epoch)
+            if not calls:
+                goon.register(epoch, late)
+            calls.append(epoch)
+            return outcomes
+
+        with mock.patch.object(goon, 'resume_all', resume_all):
+            goon.watch(self.payload())
+        self.assertEqual(len(calls), 2)
+        [(_, _, body)] = self.server.requests
+        self.assertEqual(body, b'5-hour limit reset: resumed 2 closed sessions.')
+        self.assertEqual([p.name for p in self.dir.glob('*.lock')], [])
+
+    def test_a_spend_cap_reported_beside_the_window_does_not_hold_the_resume_back(self):
+        payload = self.payload()
+        row = json.loads(Path(payload['transcript_path']).read_text())
+        row['apiErrorParams']['rate_limit_info'].update(
+            overageDisabledReason='org_spend_cap_reached',
+            overageResetsAt=row['apiErrorParams']['rate_limit_info']['resetsAt'] + 86400 * 20,
+        )
+        Path(payload['transcript_path']).write_text(json.dumps(row) + '\n')
+        goon.watch(payload)
+        self.assertTrue(self.calls.exists())
+        [(_, _, body)] = self.server.requests
+        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
+
     def test_an_open_session_is_not_resumed_and_is_reported(self):
         self.open_session()
         goon.watch(self.payload())
         self.assertFalse(self.calls.exists())
         [(_, _, body)] = self.server.requests
-        self.assertEqual(body, b'Limit reset: 1 open session left to the Goon mod inside.')
+        self.assertEqual(body, b'5-hour limit reset: 1 open session left to the Goon mod inside.')
 
     def test_the_email_and_token_travel_as_headers_when_set(self):
         env = {'CLAUDE_PLUGIN_OPTION_NOTIFY_EMAIL': 'me@example.com', 'CLAUDE_PLUGIN_OPTION_NTFY_TOKEN': 'tk_secret'}
@@ -486,11 +620,12 @@ class WatchTest(WithFakeClaude):
         self.assertNotIn('Email', headers)
         self.assertNotIn('Authorization', headers)
 
-    def test_nothing_is_pushed_without_a_topic(self):
+    def test_an_empty_topic_option_pushes_to_the_private_topic(self):
         with mock.patch.dict(os.environ, {'CLAUDE_PLUGIN_OPTION_NTFY_TOPIC': ''}):
             goon.watch(self.payload())
-        self.assertTrue(self.calls.exists())
-        self.assertEqual(self.server.requests, [])
+        [(path, _, _)] = self.server.requests
+        self.assertEqual(path, '/' + (self.dir / 'topic').read_text().strip())
+        self.assertTrue(path.startswith('/claude-goon-'))
 
     @mock.patch.dict(os.environ, {'CLAUDE_PLUGIN_OPTION_QUIET_HOURS': '22:00-07:00'})
     @mock.patch.object(goon, 'sleep_until')
@@ -515,7 +650,7 @@ class WatchTest(WithFakeClaude):
         self.assertEqual(self.server.requests, [])
         self.assertEqual(
             goon.take_pending(
-                int(limits.find_limit(self.root / f'{SESSION}.jsonl', datetime.now(timezone.utc)).reset.timestamp())
+                int(lw.find_limit(self.root / f'{SESSION}.jsonl', datetime.now(timezone.utc)).reset.timestamp())
             ),
             [],
         )
@@ -589,6 +724,13 @@ class ResetCommandTest(WithDirs):
         with mock.patch.object(sys, 'stdout', out), mock.patch.object(goon, 'LOOKUP_TRIES', 1):
             goon.main(['reset', '--session', SESSION])
         self.assertEqual(out.getvalue(), '')
+
+
+class VendoredTest(unittest.TestCase):
+    def test_the_copy_of_limitwatch_matches_the_hash_in_its_header(self):
+        _, header, body = (HOOKS / 'limitwatch.py').read_text().split('\n', 2)
+        stated = re.search(r'sha256: ([0-9a-f]{64})', header).group(1)
+        self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), stated)
 
 
 if __name__ == '__main__':
