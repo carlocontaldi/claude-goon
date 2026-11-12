@@ -48,6 +48,8 @@ All seven values are optional.
 | Notification email | Also have ntfy email the summary. |
 | ntfy access token | Needed only for the email: ntfy.sh refuses emails from anonymous requests. |
 
+> **Warning: a resume inherits your permission mode, and nobody is there to check it.** An open session continues under its own mode. A closed one is resumed headless under the mode your settings give it, unless the option above is set. If that mode is `bypassPermissions` (no prompts at all), `auto` (a classifier approves actions) or `acceptEdits` (file edits are approved), the unattended run does what it allows without asking. Changing the mode before your credits run out is up to you; set the option to `manual` to pin the mode that asks, and Goon holds those prompts instead.
+
 A closed session that reaches a permission prompt is paused, not refused: Goon keeps the prompt open and pushes `A resumed session is waiting on a permission prompt for <tool>.` The run is ended after 24 hours. Answering the prompt from Goon is not built yet. With an email set, Goon sends one email per limit reset and one more for each resumed session that reaches a prompt; [Claude Portavoce](https://github.com/carlocontaldi/claude-portavoce) sends its own, and the free ntfy tier allows five emails a day.
 
 What leaves your machine: one HTTPS request to ntfy.sh (or `GOON_NTFY_URL`) per reset, with the topic in the URL, your email and token in headers, and a one-line body of counts (or the tool's name, for a prompt). No project names, paths or session ids.
