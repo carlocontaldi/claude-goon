@@ -2,8 +2,7 @@
 
 > **goon** · /ɡuːn/ (*GOON*) · *noun*, plural *goons*
 >
-> 1. A man hired to terrorize or eliminate opponents; a thug.
-> 2. A stupid person.
+> A henchman: a person hired to do what another sends them to do.
 >
 > *Probably short for English dialect* gooney, *a simpleton. Here the name also runs together* go on.
 
