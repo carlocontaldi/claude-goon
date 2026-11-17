@@ -1,4 +1,7 @@
-# Claude Goon
+<h1 align="center">
+  <img src="assets/goon-logo.png" alt="" width="120"><br>
+  Claude Goon
+</h1>
 
 > **goon** · /ɡuːn/ (*GOON*) · *noun*, plural *goons*
 >
