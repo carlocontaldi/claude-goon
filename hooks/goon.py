@@ -58,6 +58,7 @@ STALE_NOTE = 24 * 3600  # seconds after its resume time that a note of the mod's
 MAX_RESUMES = 4  # per session and day, so a session that keeps hitting a limit is not looped forever
 LOOKUP_TRIES = 10  # the limit error may not be in the transcript yet when the hook fires
 TOPIC_PREFIX = 'claude-goon'
+ICON_URL = 'https://raw.githubusercontent.com/carlocontaldi/claude-goon/main/assets/goon-icon-64.png'
 PROMPT_WAIT = 24 * 3600  # seconds a resumed session may sit on a permission prompt before its run is ended
 PERMISSION_MODES = ('acceptEdits', 'auto', 'dontAsk', 'plan', 'manual')  # never bypassPermissions
 OFF_EXIT = 3  # `power` exit code while off; 1 and 2 are a crash and a usage error. register.ts holds a copy
@@ -402,7 +403,8 @@ def push(text: str, settings: dict[str, str]) -> None:
         text,
         logger.info,
         title='Claude Goon',
-        tags='arrow_forward',
+        tags='service_dog,arrow_forward',
+        icon=ICON_URL,
         email=settings['notify_email'],
         token=settings['ntfy_token'],
     )
@@ -427,7 +429,8 @@ def send_test(settings: dict[str, str]) -> str:
         'Claude Goon test: if you can read this, the topic works.',
         logger.info,
         title='Claude Goon test',
-        tags='bell',
+        tags='service_dog,bell',
+        icon=ICON_URL,
         token=settings['ntfy_token'],
     )
     return 'Sent: it should show up in the ntfy app now.' if sent else f'Not sent; {DIR / "log.txt"} says why.'

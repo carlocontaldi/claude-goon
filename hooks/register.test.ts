@@ -21,7 +21,8 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
   const draft = { text: '' }
   const power = { isOn: true, isBroken: false }
   const plan = { message: TEXT, presets: PRESETS, isOffHere: false }
-  const asked: { question: string; options: string[] }[] = []
+  const asked: { question: string; header: string; options: string[] }[] = []
+  const toasts: string[] = []
   const answers: (string | undefined)[] = []
   const commands: string[][] = []
   const tracked: string[][] = []
@@ -74,13 +75,16 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
   on('tool.call', { tool: 'AskUserQuestion' }, async (_, e) => {
     const [question] = e.questions
     if (question === undefined) return { deny: 'no question' }
-    asked.push({ question: question.question, options: question.options.map(option => option.label) })
+    asked.push({ question: question.question, header: question.header, options: question.options.map(option => option.label) })
     await clock.sleep(askDelay.ms)
     const answer = answers.shift()
     if (answer === undefined) return { deny: 'dismissed' }
     return { result: { questions: e.questions, answers: { [question.question]: answer } } }
   })
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   on('prompt.read', () => ({ value: { text: draft.text, cursor: draft.text.length } }))
   on('prompt.submit', (_, e) => {
     submitted.push(e.text)
@@ -91,7 +95,7 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
   on('turn.start', () => ({ turnId: 't2' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: 'sess-1' }))
-  return { clock, store, submitted, lookups, draft, power, ran, plan, asked, answers, commands, tracked, askDelay }
+  return { clock, store, submitted, lookups, draft, power, ran, plan, asked, toasts, answers, commands, tracked, askDelay }
 }
 
 const reply = (resumeAt: number) => JSON.stringify({ resetAt: RESET / 1000, resumeAt: resumeAt / 1000, window: 'five_hour' })
@@ -404,6 +408,17 @@ test('a limit stop asks for the session message, the default first, and keeps wh
     ['session', 'sess-1', 'reset'],
     ['session', 'sess-1', 'message', 'Go on and recap'],
   ])
+})
+
+test('the dialog and the toasts carry the dog', async ($, on) => {
+  const { clock, asked, toasts, answers } = world(on, limit)
+  answers.push('Go on')
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  expect(asked[0]?.header).toBe('🐕‍🦺 Goon')
+  expect(toasts.length).toBeGreaterThan(0)
+  expect(toasts.every(text => text.startsWith('🐕‍🦺 '))).toBe(true)
 })
 
 test('picking the default keeps no message of its own, so a later change to the default still counts', async ($, on) => {

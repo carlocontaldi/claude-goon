@@ -7,6 +7,7 @@ const OFF_EXIT = 3 // goon.py's exit code for "switched off"; any other failure 
 const RETRY_MS = 60_000
 const PAGE = 4 // the dialog shows 2 to 4 options and takes anything typed under its Other
 const MORE = 'More presets…'
+const DOG = '🐕‍🦺' // Goon's mark, in front of what it shows the person
 
 let resumeOption = ''
 let quietHours = ''
@@ -16,6 +17,8 @@ let skipWhileTyping = true
 let timer: Timer | undefined
 let isWaitingForTyping = false
 let turns = 0
+
+const toast = ($: EngineInterface, text: string) => $.ui.toast(`${DOG} ${text}`)
 
 const disarm = async ($: EngineInterface, sessionId: string) => {
   timer?.cancel()
@@ -70,7 +73,7 @@ const fire = async ($: EngineInterface, sessionId: string) => {
   const { exitCode, plan } = await planFor($, sessionId)
   if (exitCode === OFF_EXIT) {
     await disarm($, sessionId)
-    $.ui.toast('Goon is off: this session was not continued')
+    toast($, 'Goon is off: this session was not continued')
     return
   }
   if (plan === undefined) {
@@ -79,13 +82,13 @@ const fire = async ($: EngineInterface, sessionId: string) => {
     return
   }
   if (skipWhileTyping && (await $.prompt.read()).text.trim() !== '') {
-    if (!isWaitingForTyping) $.ui.toast('Goon: waiting for you to finish typing')
+    if (!isWaitingForTyping) toast($, 'Goon: waiting for you to finish typing')
     isWaitingForTyping = true
     later($, sessionId, TYPING_RECHECK_MS)
     return
   }
   await disarm($, sessionId)
-  $.ui.toast('Goon: the limit has reset, continuing')
+  toast($, 'Goon: the limit has reset, continuing')
   await $.prompt.submit({ text: plan.message })
   await goon($, 'command', 'session', sessionId, 'reset') // the choices were for this interruption only
 }
@@ -95,7 +98,7 @@ const arm = async ($: EngineInterface, sessionId: string, at: number) => {
   timer?.cancel() // after the await, so two overlapping calls cannot both slip past it
   later($, sessionId, delay)
   await $.store.set(KEY_PREFIX + sessionId, at)
-  $.ui.toast(`Goon will continue this session at ${new Date(at).toISOString().slice(11, 16)} UTC`)
+  toast($, `Goon will continue this session at ${new Date(at).toISOString().slice(11, 16)} UTC`)
 }
 
 // The presets one page at a time: the default first, then "More presets…" while some are left.
@@ -106,7 +109,7 @@ const askMessage = async ($: EngineInterface, { message, presets }: Plan) => {
     const rest = options.slice(from)
     const shown = rest.length <= PAGE ? rest : rest.slice(0, PAGE - 1)
     const labels = shown.map((text, i) => (from + i === 0 ? `${text} (default)` : text))
-    const answer = await $.ui.ask(question, { options: shown.length < rest.length ? [...labels, MORE] : labels, header: 'Goon' })
+    const answer = await $.ui.ask(question, { options: shown.length < rest.length ? [...labels, MORE] : labels, header: `${DOG} Goon` })
     if (answer === MORE) {
       from += shown.length
       continue
@@ -124,7 +127,7 @@ const chooseMessage = async ($: EngineInterface, sessionId: string, seen: number
   if (plan === undefined) return
   const answer = await askMessage($, plan).catch(() => undefined) // dismissed, or nobody to ask
   if (answer === undefined || turns !== seen) return
-  $.ui.toast((await goon($, 'command', 'session', sessionId, 'message', answer)).stdout.trim())
+  toast($, (await goon($, 'command', 'session', sessionId, 'message', answer)).stdout.trim())
 }
 
 // The turn that hit the limit ended with an API error; a newer turn means the person got there first.

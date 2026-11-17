@@ -1,5 +1,5 @@
 # Vendored from claude-meridiana: edit it there and run sync.py.
-# body sha256: a4a53cdc5499f2c3b100831774cc9b3cdb43f636a48a12d8625c275ca7d78927
+# body sha256: d9a4941e81b9701644bbcf138c2f34ae283b1eea5481968a8fc6bd495c983e51
 """Reading a Claude Code usage-limit error, waiting for its reset and pushing to ntfy; shared by Portavoce and Goon."""
 
 from __future__ import annotations
@@ -344,11 +344,14 @@ def push(
     *,
     title: str,
     tags: str,
+    icon: str = '',
     email: str = '',
     token: str = '',
 ) -> bool:
     """POST `text` to the ntfy topic, retrying transient failures; True once it went through."""
     headers = {'Title': title, 'Tags': tags}
+    if icon:
+        headers['Icon'] = icon  # a URL: the ntfy app on the phone downloads the image, this machine does not
     if email:
         headers['Email'] = email
     if token:

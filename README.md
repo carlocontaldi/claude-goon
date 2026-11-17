@@ -59,7 +59,7 @@ A number picks that preset; any other text is sent as typed, up to 1,000 charact
 
 Goon reads the message when it is about to send it, not when it saw the limit. A change made while a reset is still hours away therefore applies to every session waiting for it. A resume that has already started keeps the message it started with.
 
-When a limit stops a session that has the Goon mod loaded, the session asks what to send it. The question lists the presets with the default first, goes on to a second page (`More presets…`) when there are more than four (the six built-in ones already need it), and takes your own text in its free-text field. Dismissing it keeps the default. Picking the default option also keeps it, and pins nothing, so a later change to the default still applies. The choice is kept for that session, whether it is still open at the reset or has been closed by then.
+When a limit stops a session that has the Goon mod loaded, the session asks what to send it. The question lists the presets with the default first, goes on to a second page (`More presets…`) when there are more than four (the six built-in ones already need it), and takes your own text in its free-text field. The question's chip and Goon's toasts start with 🐕‍🦺. Dismissing it keeps the default. Picking the default option also keeps it, and pins nothing, so a later change to the default still applies. The choice is kept for that session, whether it is still open at the reset or has been closed by then.
 
 To change a session's choice later:
 
@@ -145,7 +145,7 @@ All eight values are optional.
 
 A closed session that reaches a permission prompt is paused, not refused: Goon keeps the prompt open and pushes `A resumed session is waiting on a permission prompt for <tool>.` (with *Name sessions in notifications* on, `"<title>"` replaces `A resumed session`). The run is ended after 24 hours. Answering the prompt from Goon is not built yet. With an email set, Goon sends one email per limit reset and one more for each resumed session that reaches a prompt; [Claude Portavoce](https://github.com/carlocontaldi/claude-portavoce) sends its own, and the free ntfy tier allows five emails a day.
 
-What leaves your machine: one HTTPS request to ntfy.sh (or `GOON_NTFY_URL`) per reset, with the topic in the URL, your email and token in headers, and a one-line body of counts (or the tool's name, for a prompt). No project names, paths or session ids. With *Name sessions in notifications* on, the body also has one line per session (at most eight) with its title or folder name. Claude Code writes the title from your conversation, so it can name a project or a customer, and anyone who knows the topic can read it.
+What leaves your machine: one HTTPS request to ntfy.sh (or `GOON_NTFY_URL`) per reset, with the topic in the URL, your email and token in headers next to a fixed title, a dog tag and a state tag (ntfy shows them as emoji before the title, and in the email's subject) and the address of the logo on raw.githubusercontent.com (the `Icon` header; the ntfy app on your phone downloads the image, this machine does not), and a one-line body of counts (or the tool's name, for a prompt). No project names, paths or session ids. With *Name sessions in notifications* on, the body also has one line per session (at most eight) with its title or folder name. Claude Code writes the title from your conversation, so it can name a project or a customer, and anyone who knows the topic can read it.
 
 ## Set up ntfy
 

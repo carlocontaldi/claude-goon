@@ -400,7 +400,7 @@ class SendTestTest(WithDirs):
         [(path, headers, body)] = self.server.requests
         self.assertEqual(path, '/secret-topic')
         self.assertNotIn('Email', headers)
-        self.assertEqual(headers['Title'], 'Claude Goon test')
+        self.assertEqual((headers['Title'], headers['Tags']), ('Claude Goon test', 'service_dog,bell'))
         self.assertIn(b'the topic works', body)
 
     def test_a_failure_points_at_the_log(self):
@@ -553,7 +553,8 @@ class WatchTest(WithFakeClaude):
         self.assertEqual(record['message']['message']['content'], 'carry on')
         [(path, headers, body)] = self.server.requests
         self.assertEqual(path, '/secret-topic')
-        self.assertEqual(headers['Title'], 'Claude Goon')
+        self.assertEqual((headers['Title'], headers['Tags']), ('Claude Goon', 'service_dog,arrow_forward'))
+        self.assertEqual(headers['Icon'], goon.ICON_URL)
         self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
         self.assertEqual([p.name for p in self.dir.glob('*.lock')], [])
 
@@ -1305,6 +1306,12 @@ class DetailsTest(unittest.TestCase):
         lines = goon.session_lines(results).splitlines()
         self.assertEqual(len(lines), goon.MAX_DETAIL_LINES + 1)
         self.assertEqual(lines[-1], 'and 3 more')
+
+
+class IconTest(unittest.TestCase):
+    def test_the_icon_url_names_a_file_in_this_repository(self):
+        path = goon.ICON_URL.split('/main/', 1)[1]
+        self.assertTrue((HOOKS.parent / path).is_file())
 
 
 class VendoredTest(unittest.TestCase):
