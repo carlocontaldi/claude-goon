@@ -40,7 +40,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --global @anthropic-ai/claude-code@2.1.319
+      - run: npm install --global @anthropic-ai/claude-code@2.1.325
       - run: claude plugin validate .
       - run: claude plugin test .
 
