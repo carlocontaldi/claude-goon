@@ -17,12 +17,25 @@ from unittest import mock
 HOOKS = Path(__file__).resolve().parent.parent / 'hooks'
 sys.path.insert(0, str(HOOKS))
 import goon  # noqa: E402
+import goon_choices as choices  # noqa: E402
 import goon_limits as limits  # noqa: E402
 import goon_quiet as quiet  # noqa: E402
 import limitwatch as lw  # noqa: E402
 
 NOW = datetime(2026, 10, 29, 21, 40, tzinfo=timezone.utc)
 SESSION = '11111111-2222-3333-4444-555555555555'
+TWIN = '11111111-9999-3333-4444-555555555555'  # shares its first eight characters with SESSION
+OTHER = '99999999-aaaa-bbbb-cccc-dddddddddddd'
+FACTS = {
+    'title': 'Fix the importer',
+    'last_prompt': 'please fix the importer',
+    'branch': 'main',
+    'model': 'model-a',
+    'cost': 1.234,
+    'size': 3_400_000,
+    'limit': 'weekly limit',
+    'interrupted': '2026-10-29T21:40:00+00:00',
+}
 
 
 def stamp(at: datetime) -> str:
@@ -184,8 +197,8 @@ class ResumeAllTest(WithDirs):
         with mock.patch.object(goon, 'decide', return_value='resume'):
             with mock.patch.object(goon, 'launch', side_effect=[RuntimeError('boom'), 'resumed']):
                 with self.assertLogs('goon', 'ERROR'):
-                    outcomes = goon.resume_all(100)
-        self.assertEqual(outcomes, Counter(failed=1, resumed=1))
+                    results = goon.resume_all(100)
+        self.assertEqual(Counter(outcome for _, outcome in results), Counter(failed=1, resumed=1))
 
     def test_a_session_opened_while_it_waited_its_turn_is_left_alone(self):
         goon.register(100, self.record(Path('a.jsonl'), 'a' * 36))
@@ -193,10 +206,10 @@ class ResumeAllTest(WithDirs):
         with mock.patch.object(goon, 'STAGGER', 15), mock.patch.object(goon.time, 'sleep') as sleep:
             with mock.patch.object(goon, 'decide', side_effect=['resume', 'resume', 'open']):
                 with mock.patch.object(goon, 'launch', return_value='resumed') as launch:
-                    outcomes = goon.resume_all(100)
+                    results = goon.resume_all(100)
         sleep.assert_called_once_with(15)
         launch.assert_called_once()
-        self.assertEqual(outcomes, Counter(resumed=1, open=1))
+        self.assertEqual(Counter(outcome for _, outcome in results), Counter(resumed=1, open=1))
 
 
 class ResumeArgvTest(unittest.TestCase):
@@ -321,8 +334,8 @@ class SettingsTest(WithDirs):
     def test_the_resume_text_default_is_the_one_the_manifest_declares(self):
         with mock.patch.dict(os.environ):
             os.environ.pop('CLAUDE_PLUGIN_OPTION_RESUME_TEXT', None)
-            self.assertEqual(goon.read_settings()['resume_text'] or goon.DEFAULT_RESUME_TEXT, 'go on')
-        self.assertEqual(self.MANIFEST['resume_text']['default'], goon.DEFAULT_RESUME_TEXT)
+            self.assertEqual(goon.read_settings()['resume_text'] or choices.DEFAULT_MESSAGE, 'go on')
+        self.assertEqual(self.MANIFEST['resume_text']['default'], choices.DEFAULT_MESSAGE)
 
     def test_the_manifest_has_no_fixed_topic(self):
         self.assertNotIn('default', self.MANIFEST['ntfy_topic'])
@@ -508,7 +521,7 @@ class SuperviseTest(WithFakeClaude):
 
     def test_an_unset_text_falls_back_to_the_default(self):
         goon.supervise(self.job(), {**goon.read_settings(), 'resume_text': ''})
-        self.assertEqual(json.loads(self.calls.read_text())['message']['message']['content'], goon.DEFAULT_RESUME_TEXT)
+        self.assertEqual(json.loads(self.calls.read_text())['message']['message']['content'], choices.DEFAULT_MESSAGE)
 
     @mock.patch.dict(os.environ, {'FAKE_MODE': 'prompt'})
     @mock.patch.object(goon, 'PROMPT_WAIT', 1)
@@ -758,6 +771,540 @@ class ResetCommandTest(WithDirs):
         with mock.patch.object(sys, 'stdout', out), mock.patch.object(goon, 'LOOKUP_TRIES', 1):
             goon.main(['reset', '--session', SESSION])
         self.assertEqual(out.getvalue(), '')
+
+
+class ChoicesTest(WithDirs):
+    def test_the_built_in_presets_include_the_ones_asked_for_and_added_ones_follow(self):
+        choices.add_preset(self.dir, 'go on and test')
+        listed = choices.presets(self.dir)
+        self.assertEqual(
+            listed[:6],
+            [
+                'go on',
+                'go on and review',
+                'go on and recap',
+                'go on and wrap up',
+                'go on, then review and recap',
+                'go on, then review and wrap up',
+            ],
+        )
+        self.assertEqual(listed[6:], ['go on and test'])
+
+    def test_a_number_picks_a_preset_and_other_text_stands_for_itself(self):
+        self.assertEqual(choices.resolve(self.dir, '3'), 'go on and recap')
+        self.assertEqual(choices.resolve(self.dir, '  fix   the tests  '), 'fix the tests')
+
+    def test_a_number_without_a_preset_is_refused(self):
+        for spec in ('0', '7'):
+            with self.assertRaisesRegex(choices.ChoiceError, 'no preset'):
+                choices.resolve(self.dir, spec)
+
+    def test_an_empty_or_over_long_message_is_refused(self):
+        with self.assertRaisesRegex(choices.ChoiceError, 'empty'):
+            choices.resolve(self.dir, '   ')
+        with self.assertRaisesRegex(choices.ChoiceError, 'limit is'):
+            choices.resolve(self.dir, 'x' * (choices.MAX_MESSAGE + 1))
+
+    def test_a_preset_is_added_once_and_removed_by_number_or_by_text(self):
+        choices.add_preset(self.dir, 'one')
+        choices.add_preset(self.dir, 'two')
+        with self.assertRaisesRegex(choices.ChoiceError, 'already'):
+            choices.add_preset(self.dir, 'one')
+        self.assertEqual(choices.remove_preset(self.dir, '7'), 'one')
+        self.assertEqual(choices.remove_preset(self.dir, 'two'), 'two')
+        self.assertEqual(choices.presets(self.dir), list(choices.BUILT_IN_PRESETS))
+
+    def test_a_built_in_or_unknown_preset_cannot_be_removed(self):
+        with self.assertRaisesRegex(choices.ChoiceError, 'built in'):
+            choices.remove_preset(self.dir, '1')
+        with self.assertRaisesRegex(choices.ChoiceError, 'not a preset'):
+            choices.remove_preset(self.dir, 'never added')
+
+    def test_the_default_message_is_the_saved_one_then_the_option_then_the_built_in(self):
+        self.assertEqual(choices.default_message(self.dir, ''), 'go on')
+        self.assertEqual(choices.default_message(self.dir, 'from option'), 'from option')
+        choices.set_default_message(self.dir, 'saved')
+        self.assertEqual(choices.default_message(self.dir, 'from option'), 'saved')
+        choices.set_default_message(self.dir, None)
+        self.assertEqual(choices.default_message(self.dir, 'from option'), 'from option')
+
+    def test_a_session_message_beats_the_default_and_the_session_alone_is_affected(self):
+        choices.set_default_message(self.dir, 'saved')
+        choices.choose(self.dir, SESSION, message='mine')
+        self.assertEqual(choices.message_for(self.dir, SESSION, ''), 'mine')
+        self.assertEqual(choices.message_for(self.dir, OTHER, ''), 'saved')
+
+    def test_choices_are_dropped_one_by_one_and_the_file_goes_with_the_last(self):
+        choices.choose(self.dir, SESSION, enabled=False, message='mine')
+        choices.choose(self.dir, SESSION, message=None)
+        self.assertEqual(choices.session_choice(self.dir, SESSION), {'enabled': False})
+        choices.choose(self.dir, SESSION, enabled=None)
+        self.assertFalse(choices.session_file(self.dir, SESSION).exists())
+        self.assertTrue(choices.is_enabled_for(self.dir, SESSION))
+
+    def test_choices_are_kept_in_a_file_only_the_owner_can_read(self):
+        choices.choose(self.dir, SESSION, message='mine')
+        self.assertEqual(choices.session_file(self.dir, SESSION).stat().st_mode & 0o777, 0o600)
+
+    def test_something_that_is_no_session_id_is_refused_and_reads_as_no_choice(self):
+        with self.assertRaisesRegex(choices.ChoiceError, 'not a session id'):
+            choices.choose(self.dir, '../escape', message='x')
+        self.assertEqual(choices.session_choice(self.dir, '../escape'), {})
+        self.assertEqual(choices.message_for(self.dir, '../escape', ''), 'go on')
+
+
+class SessionInfoTest(WithDirs):
+    def info(self, *rows):
+        return limits.session_info(self.transcript(*rows))
+
+    def test_the_newest_of_each_fact_wins(self):
+        rows = [
+            {'type': 'ai-title', 'aiTitle': 'Old title'},
+            {'type': 'ai-title', 'aiTitle': 'New   title'},
+            {'type': 'last-prompt', 'lastPrompt': 'first'},
+            {'type': 'last-prompt', 'lastPrompt': 'second'},
+            {'type': 'cost-state', 'totalCostUSD': 0.5},
+            {'type': 'cost-state', 'totalCostUSD': 1.5},
+            {'type': 'assistant', 'gitBranch': 'old-branch', 'message': {'model': 'model-a'}},
+            {'type': 'user', 'gitBranch': 'feature'},
+            {'type': 'assistant', 'message': {'model': '<synthetic>'}},
+        ]
+        info = self.info(*rows)
+        self.assertEqual(
+            {k: v for k, v in info.items() if k != 'size'},
+            {'title': 'New title', 'last_prompt': 'second', 'cost': 1.5, 'branch': 'feature', 'model': 'model-a'},
+        )
+        self.assertEqual(info['size'], (self.root / 'transcript.jsonl').stat().st_size)
+
+    def test_the_newest_folder_is_the_sessions(self):
+        rows = [
+            {'type': 'user', 'cwd': '/first'},
+            {'type': 'user', 'cwd': '/second'},
+            {'type': 'user', 'isSidechain': True, 'cwd': '/agent'},
+        ]
+        self.assertEqual(self.info(*rows)['cwd'], '/second')
+
+    def test_a_subagents_model_and_branch_are_not_the_sessions(self):
+        row = {
+            'type': 'assistant',
+            'isSidechain': True,
+            'gitBranch': 'agent-branch',
+            'message': {'model': 'agent-model'},
+        }
+        self.assertNotIn('model', self.info(row))
+        self.assertNotIn('branch', self.info(row))
+
+    def test_values_of_the_wrong_type_are_left_out(self):
+        rows = [{'type': 'ai-title', 'aiTitle': 5}, {'type': 'cost-state', 'totalCostUSD': 'a lot'}]
+        self.assertEqual(set(self.info(*rows)), {'size'})
+
+    def test_a_long_prompt_is_cut_on_one_line(self):
+        prompt = limits.session_info(self.transcript({'type': 'last-prompt', 'lastPrompt': 'a\nb ' * 100}))[
+            'last_prompt'
+        ]
+        self.assertEqual(len(prompt), 200)
+        self.assertNotIn('\n', prompt)
+
+    def test_an_unreadable_transcript_gives_nothing(self):
+        self.assertEqual(limits.session_info(self.root / 'nope.jsonl'), {})
+
+
+class WithPending(WithDirs):
+    """Sessions registered for a reset, as the hook's watcher leaves them, with the plugin options unset."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop('CLAUDE_PLUGIN_OPTION_RESUME_TEXT', None)
+
+    def register(self, session_id=SESSION, epoch=1_800_000_000, **facts):
+        goon.register(epoch, self.record(self.transcript(limit_row()), session_id), {**FACTS, **facts})
+
+
+class ListTest(WithPending):
+    def test_nothing_pending_says_so(self):
+        self.assertEqual(goon.run_command('list'), 'No interrupted sessions are waiting.')
+
+    def test_a_pending_session_is_listed_with_what_is_known_about_it(self):
+        self.register()
+        text = goon.run_command('list')
+        for expected in (
+            '1 interrupted session waiting. Goon is on; it sends "go on" unless a session has its own message.',
+            '11111111  Fix the importer',
+            f'closed, {self.cwd} (main), 3.4 MB, $1.23 so far, model-a',
+            'weekly limit, resets Jan 15, 08:00 UTC',
+            'will send "go on"',
+            'last prompt: please fix the importer',
+        ):
+            self.assertIn(expected, text)
+
+    def test_a_session_a_process_holds_is_listed_as_open(self):
+        self.register()
+        self.open_session()
+        self.assertIn(f'open, {self.cwd}', goon.run_command('list'))
+
+    def test_a_session_without_a_title_is_named_by_its_folder(self):
+        self.register(title=None)
+        self.assertIn(f'11111111  {self.cwd.name}', goon.run_command('list'))
+
+    def test_the_message_a_session_will_get_and_whether_it_is_switched_off_show(self):
+        self.register()
+        goon.run_command('session 1111 message 3')
+        self.assertIn('will send "go on and recap" (chosen for this session)', goon.run_command('list'))
+        goon.run_command('session 1111 off')
+        self.assertIn('switched off for this session: nothing will be sent', goon.run_command('list'))
+
+    def test_the_header_says_when_goon_is_off(self):
+        self.register()
+        goon.power('off')
+        self.assertIn('Goon is off, so nothing is resumed', goon.run_command('list'))
+
+    def test_sessions_come_in_the_order_of_their_resets(self):
+        self.register(OTHER, epoch=1_800_000_000, title='Later')
+        self.register(SESSION, epoch=1_700_000_000, title='Sooner')
+        text = goon.run_command('list')
+        self.assertLess(text.index('Sooner'), text.index('Later'))
+
+
+class MessageCommandTest(WithPending):
+    def test_presets_are_numbered_and_the_default_is_marked(self):
+        text = goon.run_command('presets')
+        self.assertIn('1. go on  (default)', text)
+        self.assertIn('5. go on, then review and recap\n', text)
+        goon.run_command('message 5')
+        self.assertIn('5. go on, then review and recap  (default)', goon.run_command('presets'))
+
+    def test_a_number_or_text_sets_the_default_for_every_session_until_reset(self):
+        self.assertIn('"go on and recap"', goon.run_command('message 3'))
+        self.assertEqual(choices.default_message(self.dir, ''), 'go on and recap')
+        self.assertIn('"fix the tests"', goon.run_command('message fix the tests'))
+        self.assertIn('"go on"', goon.run_command('message default'))
+        self.assertEqual(choices.default_message(self.dir, ''), 'go on')
+
+    def test_message_alone_shows_it_without_changing_it(self):
+        goon.run_command('message 3')
+        self.assertIn('"go on and recap"', goon.run_command('message'))
+
+    def test_a_bad_number_is_explained_and_changes_nothing(self):
+        self.assertIn('There is no preset 9', goon.run_command('message 9'))
+        self.assertEqual(choices.default_message(self.dir, ''), 'go on')
+
+    def test_presets_are_added_and_removed(self):
+        self.assertEqual(goon.run_command('preset add go on and test'), 'Added "go on and test".')
+        self.assertIn('7. go on and test', goon.run_command('presets'))
+        self.assertEqual(goon.run_command('preset remove 7'), 'Removed "go on and test".')
+        self.assertNotIn('go on and test', goon.run_command('presets'))
+        self.assertIn('Use /goon preset add', goon.run_command('preset'))
+
+    def test_the_default_option_is_the_message_while_nothing_was_set(self):
+        os.environ['CLAUDE_PLUGIN_OPTION_RESUME_TEXT'] = 'from option'
+        self.assertIn('"from option"', goon.run_command('message'))
+
+    def test_free_text_on_the_command_line_is_taken_as_words(self):
+        with mock.patch.object(sys, 'stdout', io.StringIO()) as out:
+            goon.main(['command', 'message', 'go', 'on', 'and', 'recap'])
+        self.assertIn('"go on and recap"', out.getvalue())
+        self.assertEqual(choices.default_message(self.dir, ''), 'go on and recap')
+
+    def test_an_unknown_command_gets_the_usage(self):
+        self.assertEqual(goon.run_command('dance'), goon.USAGE)
+
+
+class SessionCommandTest(WithPending):
+    def test_a_session_is_switched_off_and_on_by_the_start_of_its_id(self):
+        self.register()
+        self.assertEqual(goon.run_command('session 1111 off'), '11111111: switched off.')
+        self.assertFalse(choices.is_enabled_for(self.dir, SESSION))
+        self.assertEqual(goon.run_command('session 11111111 on'), '11111111: switched on.')
+        self.assertTrue(choices.is_enabled_for(self.dir, SESSION))
+
+    def test_a_session_gets_its_own_message_by_number_or_text_and_gives_it_up(self):
+        self.register()
+        self.assertEqual(goon.run_command('session 1111 message 4'), '11111111: will send "go on and wrap up".')
+        self.assertEqual(choices.message_for(self.dir, SESSION, ''), 'go on and wrap up')
+        goon.run_command('session 1111 message check the logs')
+        self.assertEqual(choices.message_for(self.dir, SESSION, ''), 'check the logs')
+        goon.run_command('session 1111 message default')
+        self.assertEqual(choices.message_for(self.dir, SESSION, ''), 'go on')
+
+    def test_reset_drops_every_choice_for_the_session(self):
+        self.register()
+        goon.run_command('session 1111 off')
+        goon.run_command('session 1111 message 3')
+        goon.run_command('session 1111 reset')
+        self.assertEqual(choices.session_choice(self.dir, SESSION), {})
+
+    def test_a_prefix_that_fits_two_sessions_or_none_is_refused(self):
+        self.register()
+        self.register(TWIN)
+        self.assertIn('2 pending sessions start with 11111111', goon.run_command('session 11111111 off'))
+        self.assertIn('No pending session starts with 7777', goon.run_command('session 7777 off'))
+        self.assertEqual(choices.session_choice(self.dir, SESSION), {})
+
+    def test_a_short_prefix_is_refused(self):
+        self.register()
+        self.assertIn('first four or more characters', goon.run_command('session 11 off'))
+
+    def test_a_whole_id_is_accepted_before_the_session_is_registered(self):
+        self.assertEqual(goon.run_command(f'session {OTHER} message 4'), '99999999: will send "go on and wrap up".')
+        self.assertEqual(choices.message_for(self.dir, OTHER, ''), 'go on and wrap up')
+
+    def test_a_session_command_without_an_action_gets_the_usage(self):
+        self.register()
+        for words in ('session', 'session 1111', 'session 1111 sing'):
+            self.assertEqual(goon.run_command(words), goon.SESSION_USAGE, words)
+
+
+class PlanTest(WithPending):
+    def plan(self, session_id=SESSION):
+        with mock.patch.object(sys, 'stdout', io.StringIO()) as out:
+            goon.main(['plan', '--session', session_id])
+        return json.loads(out.getvalue())
+
+    def exit_code(self, session_id=SESSION):
+        with mock.patch.object(sys, 'stdout', io.StringIO()), self.assertRaises(SystemExit) as stopped:
+            goon.main(['plan', '--session', session_id])
+        return stopped.exception.code
+
+    def test_the_plan_is_the_message_and_the_presets_to_pick_from(self):
+        self.assertEqual(self.plan(), {'message': 'go on', 'presets': list(choices.BUILT_IN_PRESETS)})
+
+    def test_the_session_message_and_a_changed_default_show_at_once(self):
+        choices.set_default_message(self.dir, 'saved')
+        self.assertEqual(self.plan()['message'], 'saved')
+        choices.choose(self.dir, SESSION, message='mine')
+        self.assertEqual(self.plan()['message'], 'mine')
+        self.assertEqual(self.plan(OTHER)['message'], 'saved')
+
+    def test_the_command_exits_with_the_off_code_while_goon_or_the_session_is_off(self):
+        choices.choose(self.dir, SESSION, enabled=False)
+        self.assertEqual(self.exit_code(), goon.OFF_EXIT)
+        self.assertEqual(self.plan(OTHER)['message'], 'go on')
+        goon.power('off')
+        self.assertEqual(self.exit_code(OTHER), goon.OFF_EXIT)
+
+    def test_the_session_is_required(self):
+        with mock.patch.object(sys, 'stderr', io.StringIO()), self.assertRaises(SystemExit) as stopped:
+            goon.main(['plan'])
+        self.assertEqual(stopped.exception.code, 2)
+
+
+class SessionChoicesInTheWatcherTest(WithFakeClaude, WithPending):
+    def payload(self, session_id=SESSION, title=None):
+        reset = int(datetime.now(timezone.utc).timestamp()) + 1
+        rows = [limit_row(at=datetime.now(timezone.utc), reset=reset)]
+        if title:
+            rows.insert(0, {'type': 'ai-title', 'aiTitle': title})
+        path = self.root / f'{session_id}.jsonl'
+        path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        return {'session_id': session_id, 'cwd': str(self.cwd), 'transcript_path': str(path), 'error': 'rate_limit'}
+
+    def blocked(self, session_id):
+        return self.record(self.transcript(limit_row()), session_id)
+
+    def test_a_closed_session_switched_off_is_left_alone_and_an_open_one_is_left_to_its_mod(self):
+        choices.choose(self.dir, SESSION, enabled=False)
+        self.assertEqual(goon.decide(self.blocked(SESSION)), 'session-off')
+        self.open_session()
+        self.assertEqual(goon.decide(self.blocked(SESSION)), 'open')
+
+    def test_a_session_switched_off_is_not_resumed_and_not_counted_as_skipped(self):
+        choices.choose(self.dir, SESSION, enabled=False)
+        goon.watch(self.payload())
+        self.assertFalse(self.calls.exists())
+        self.assertEqual(self.server.requests, [])
+        self.assertIsNone(goon.summary(Counter({'session-off': 2}), '5-hour limit'))
+
+    def test_the_sessions_own_message_is_what_the_resumed_run_is_sent(self):
+        choices.choose(self.dir, SESSION, message='go on and recap')
+        goon.watch(self.payload())
+        self.assertEqual(json.loads(self.calls.read_text())['message']['message']['content'], 'go on and recap')
+
+    def test_a_message_changed_while_the_watcher_waits_is_the_one_sent(self):
+        goon.register(100, self.record(Path('t.jsonl'), SESSION))
+        goon.run_command('message 5')
+        with mock.patch.object(goon, 'decide', return_value='resume'):
+            with mock.patch.object(goon, 'start_supervisor') as start:
+                goon.resume_all(100)
+        self.assertEqual(start.call_args.args[0]['message'], 'go on, then review and recap')
+
+    def test_choices_for_a_handled_session_are_forgotten_but_an_open_ones_are_kept_for_its_mod(self):
+        for session_id in (SESSION, OTHER):
+            goon.register(100, self.record(Path('t.jsonl'), session_id))
+            choices.choose(self.dir, session_id, message='mine')
+        with mock.patch.object(
+            goon, 'decide', side_effect=lambda record: 'open' if record['session_id'] == OTHER else 'continued'
+        ):
+            goon.resume_all(100)
+        self.assertEqual(choices.session_choice(self.dir, SESSION), {})
+        self.assertEqual(choices.session_choice(self.dir, OTHER), {'message': 'mine'})
+
+    def test_what_is_known_about_the_session_is_kept_with_its_registration(self):
+        seen = []
+
+        def look(epoch):
+            seen.extend(goon.pending_records())
+            goon.take_pending(epoch)
+            return []
+
+        with mock.patch.object(goon, 'resume_all', look):
+            goon.watch(self.payload(title='Fix the importer'))
+        [(epoch, record)] = seen
+        self.assertEqual((record['title'], record['limit']), ('Fix the importer', '5-hour limit'))
+        self.assertEqual(record['session_id'], SESSION)
+        self.assertIn('interrupted', record)
+        self.assertGreater(record['size'], 0)
+
+    def test_the_push_names_the_sessions_only_when_the_option_is_on(self):
+        goon.watch(self.payload(title='Fix the importer'))
+        [(_, _, body)] = self.server.requests
+        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
+
+    @mock.patch.dict(os.environ, {'CLAUDE_PLUGIN_OPTION_PUSH_DETAILS': 'true'})
+    def test_with_the_option_on_the_push_names_each_session_and_what_became_of_it(self):
+        goon.watch(self.payload(title='Fix the importer'))
+        [(_, _, body)] = self.server.requests
+        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.\n- Fix the importer: resumed')
+
+    @mock.patch.dict(os.environ, {'CLAUDE_PLUGIN_OPTION_PUSH_DETAILS': 'true', 'FAKE_MODE': 'prompt'})
+    @mock.patch.object(goon, 'PROMPT_WAIT', 1)
+    def test_a_held_prompt_names_its_session_when_the_option_is_on(self):
+        goon.supervise({**self.job(), 'label': 'Fix the importer'}, goon.read_settings())
+        [(_, _, body)] = self.server.requests
+        self.assertEqual(body, b'"Fix the importer" is waiting on a permission prompt for Write.')
+
+
+class ModOnlyTest(WithPending):
+    """Sessions only the mod knows about: it armed them, the StopFailure hook never registered them."""
+
+    def stopped_session(self, session_id=SESSION, *more):
+        now = datetime.now(timezone.utc)
+        rows = [
+            {'type': 'ai-title', 'aiTitle': 'Fix the importer'},
+            {'type': 'user', 'cwd': str(self.cwd), 'gitBranch': 'main', 'timestamp': stamp(now)},
+            limit_row(at=now, reset=int(now.timestamp()) + 3600),
+            *more,
+        ]
+        path = self.claude / 'projects' / 'proj' / f'{session_id}.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        return path
+
+    def resume_at(self):
+        return int(datetime.now(timezone.utc).timestamp()) + 3660
+
+    def test_what_the_transcript_says_is_kept_with_the_session(self):
+        path = self.stopped_session()
+        goon.track(SESSION, self.resume_at())
+        [(_, note)] = goon.pending_records()
+        self.assertEqual(
+            (note['title'], note['cwd'], note['branch'], note['limit'], note['source']),
+            ('Fix the importer', str(self.cwd), 'main', '5-hour limit', 'mod'),
+        )
+        self.assertEqual(note['transcript_path'], str(path))
+        self.assertEqual(note['resume_at'], self.resume_at())
+
+    def test_a_session_with_no_transcript_or_no_id_is_ignored(self):
+        goon.track(OTHER, self.resume_at())
+        goon.track('../escape', self.resume_at())
+        self.assertEqual(goon.pending_records(), [])
+
+    def test_it_is_listed_as_continued_by_the_mod_inside_while_the_session_is_open(self):
+        self.stopped_session()
+        goon.track(SESSION, self.resume_at())
+        self.open_session()
+        text = goon.run_command('list')
+        self.assertIn('11111111  Fix the importer', text)
+        self.assertIn('open,', text)
+        self.assertIn('only the Goon mod inside the session continues it, at', text)
+
+    def test_a_closed_one_is_listed_as_continued_by_nobody_unless_reopened(self):
+        self.stopped_session()
+        goon.track(SESSION, self.resume_at())
+        text = goon.run_command('list')
+        self.assertIn('closed,', text)
+        self.assertIn('nothing continues it unless you reopen it before', text)
+
+    def test_a_session_the_hook_registered_too_is_listed_once_as_the_hooks(self):
+        self.stopped_session()
+        self.register()
+        goon.track(SESSION, self.resume_at())
+        text = goon.run_command('list')
+        self.assertEqual(text.count('11111111  '), 1)
+        self.assertNotIn('only the Goon mod', text)
+
+    def test_its_message_and_switch_can_be_chosen_like_any_other(self):
+        self.stopped_session()
+        goon.track(SESSION, self.resume_at())
+        goon.run_command('session 1111 message 4')
+        self.assertIn('will send "go on and wrap up" (chosen for this session)', goon.run_command('list'))
+        goon.run_command('session 1111 off')
+        self.assertIn('switched off for this session', goon.run_command('list'))
+
+    def test_a_note_long_after_its_resume_time_is_not_listed_and_the_next_track_drops_it(self):
+        self.stopped_session()
+        goon.track(SESSION, int(datetime.now(timezone.utc).timestamp()) - 2 * 86400)
+        self.assertEqual(goon.pending_records(), [])
+        self.stopped_session(OTHER)
+        goon.track(OTHER, self.resume_at())
+        self.assertEqual([p.stem for p in (self.dir / 'armed').glob('*.json')], [OTHER])
+
+    def test_a_session_that_has_moved_on_is_marked_as_continued(self):
+        self.stopped_session(SESSION, chat_row('user'), chat_row('assistant'))
+        goon.track(SESSION, self.resume_at())
+        self.assertIn('already continued: Goon will leave it alone', goon.run_command('list'))
+
+    def test_a_session_the_hook_registered_and_that_moved_on_is_marked_too(self):
+        goon.register(
+            1_800_000_000, self.record(self.transcript(limit_row(), chat_row('user'), chat_row('assistant'))), FACTS
+        )
+        self.assertIn('already continued: Goon will leave it alone', goon.run_command('list'))
+
+    def test_the_command_takes_the_session_and_the_time_it_is_armed_for(self):
+        with mock.patch.object(goon, 'track') as track:
+            goon.main(['track', '--session', SESSION, '--resume-at', '123'])
+        track.assert_called_once_with(SESSION, 123)
+        with mock.patch.object(sys, 'stderr', io.StringIO()), self.assertRaises(SystemExit) as stopped:
+            goon.main(['track', '--session', SESSION])
+        self.assertEqual(stopped.exception.code, 2)
+
+    def test_the_cwd_the_hook_gives_is_not_replaced_by_the_one_in_the_transcript(self):
+        goon.register(100, self.record(Path('t.jsonl')), {'cwd': '/elsewhere'})
+        [(_, record)] = goon.pending_records()
+        self.assertEqual(record['cwd'], str(self.cwd))
+
+
+class DetailsTest(unittest.TestCase):
+    def test_only_the_listed_words_turn_the_option_on(self):
+        for value, expected in (
+            ('true', True),
+            ('TRUE', True),
+            ('1', True),
+            ('yes', True),
+            ('false', False),
+            ('', False),
+        ):
+            self.assertEqual(goon.wants_details({'push_details': value}), expected, value)
+
+    def test_a_session_is_named_by_its_title_else_its_folder_and_sessions_nobody_acted_on_are_left_out(self):
+        results = [
+            ({'session_id': 'a', 'cwd': '/w/app', 'title': 'Fix it'}, 'resumed'),
+            ({'session_id': 'b', 'cwd': '/w/api'}, 'open'),
+            ({'session_id': 'c', 'cwd': '/w/x'}, 'continued'),
+            ({'session_id': 'd', 'cwd': '/w/y'}, 'off'),
+        ]
+        self.assertEqual(
+            goon.session_lines(results),
+            '- Fix it: resumed\n- api: left to the Goon mod inside',
+        )
+
+    def test_a_long_list_is_cut(self):
+        results = [({'session_id': str(n), 'cwd': f'/w/{n}'}, 'resumed') for n in range(goon.MAX_DETAIL_LINES + 3)]
+        lines = goon.session_lines(results).splitlines()
+        self.assertEqual(len(lines), goon.MAX_DETAIL_LINES + 1)
+        self.assertEqual(lines[-1], 'and 3 more')
 
 
 class VendoredTest(unittest.TestCase):

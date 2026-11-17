@@ -1,6 +1,6 @@
 {
   "name": "goon",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Resumes the Claude Code sessions a usage limit interrupted, as soon as the limit resets.",
   "author": { "name": "Carlo Contaldi" },
   "license": "MIT",
@@ -11,7 +11,7 @@
     "resume_text": {
       "type": "string",
       "title": "Resume message",
-      "description": "What Goon sends to an interrupted session once its limit has reset.",
+      "description": "What Goon sends to an interrupted session once its limit has reset, unless a message was chosen with /goon message or for that session.",
       "default": "go on",
       "required": false
     },
@@ -32,6 +32,13 @@
       "type": "string",
       "title": "Quiet hours",
       "description": "Optional. A daily window in which Goon resumes nothing, such as 22:00-07:00 (24 h, this machine's clock) or 22:00-07:00 Europe/Lisbon. A limit that resets inside it is acted on when the window ends. Empty is off.",
+      "required": false
+    },
+    "push_details": {
+      "type": "boolean",
+      "title": "Name sessions in notifications",
+      "description": "Also put each session's title (or folder name) and what Goon did with it in the push and email. Off by default: a notification then carries counts only. The topic is readable by anyone who knows its name.",
+      "default": false,
       "required": false
     },
     "ntfy_topic": {

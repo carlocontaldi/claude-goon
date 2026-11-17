@@ -5,6 +5,14 @@ const RESET = START + 3_600_000
 const MARGIN = 60_000
 const TEXT = 'go on'
 const KEY = 'armed:sess-1'
+const PRESETS = [
+  'go on',
+  'go on and review',
+  'go on and recap',
+  'go on and wrap up',
+  'go on, then review and recap',
+  'go on, then review and wrap up',
+]
 
 const stopped = { reason: 'error', answer: '', durationMs: 1, isAborted: false, turnId: 't1' } as const
 
@@ -12,6 +20,12 @@ const stopped = { reason: 'error', answer: '', durationMs: 1, isAborted: false, 
 const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Record<string, unknown> = {}, lookupMs = 0) => {
   const draft = { text: '' }
   const power = { isOn: true, isBroken: false }
+  const plan = { message: TEXT, presets: PRESETS, isOffHere: false }
+  const asked: { question: string; options: string[] }[] = []
+  const answers: (string | undefined)[] = []
+  const commands: string[][] = []
+  const tracked: string[][] = []
+  const askDelay = { ms: 0 }
   const clock = mock.clock(on, { now: START })
   const store = new Map(Object.entries(entries))
   on('store.get', (_, e) => ({ value: store.get(e.key) }))
@@ -35,6 +49,19 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
       ran.push({ args: rest, env: e.init?.env })
       return { value: { ...result, exitCode: 0, stdout: `ran ${rest.join(' ')}\n` } }
     }
+    if (rest[0] === 'plan') {
+      if (power.isBroken) return { value: { ...result, exitCode: 1, stdout: '' } }
+      if (!power.isOn || plan.isOffHere) return { value: { ...result, exitCode: 3, stdout: '' } }
+      return { value: { ...result, exitCode: 0, stdout: JSON.stringify({ message: plan.message, presets: plan.presets }) } }
+    }
+    if (rest[0] === 'track') {
+      tracked.push(rest.slice(1))
+      return { value: { ...result, exitCode: 0, stdout: '' } }
+    }
+    if (rest[0] === 'command') {
+      commands.push(rest.slice(1))
+      return { value: { ...result, exitCode: 0, stdout: 'done\n' } }
+    }
     if (rest[0] === 'power') {
       if (power.isBroken) return { value: { ...result, exitCode: 1, stdout: '' } }
       if (rest[1] === 'on' || rest[1] === 'off') power.isOn = rest[1] === 'on'
@@ -43,6 +70,15 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
     lookups.push([...e.argv])
     await clock.sleep(lookupMs)
     return { value: { ...result, exitCode: 0, stdout } }
+  })
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_, e) => {
+    const [question] = e.questions
+    if (question === undefined) return { deny: 'no question' }
+    asked.push({ question: question.question, options: question.options.map(option => option.label) })
+    await clock.sleep(askDelay.ms)
+    const answer = answers.shift()
+    if (answer === undefined) return { deny: 'dismissed' }
+    return { result: { questions: e.questions, answers: { [question.question]: answer } } }
   })
   on('ui.toast', () => ({ value: undefined }))
   on('prompt.read', () => ({ value: { text: draft.text, cursor: draft.text.length } }))
@@ -55,7 +91,7 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
   on('turn.start', () => ({ turnId: 't2' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: 'sess-1' }))
-  return { clock, store, submitted, lookups, draft, power, ran }
+  return { clock, store, submitted, lookups, draft, power, ran, plan, asked, answers, commands, tracked, askDelay }
 }
 
 const reply = (resumeAt: number) => JSON.stringify({ resetAt: RESET / 1000, resumeAt: resumeAt / 1000, window: 'five_hour' })
@@ -257,14 +293,24 @@ test('/goon off and /goon on switch it and say so', async ($, on) => {
   expect((await $.command.run(slash(''))).text).toBe('Goon is on.')
 })
 
-test('/goon with anything else says how to use it and changes nothing', async ($, on) => {
-  const { power } = world(on, limit)
+test('/goon with anything else goes to the script as one argument, text and spaces kept', async ($, on) => {
+  const { commands, power } = world(on, limit)
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
-  expect((await $.command.run(slash('maybe'))).text).toBe(
-    'Use /goon on, /goon off, /goon status, /goon topic, /goon topic new or /goon test.',
-  )
+  expect((await $.command.run(slash('list'))).text).toBe('done')
+  await $.command.run(slash(' message  go on, then review and recap '))
+  await $.command.run(slash('maybe'))
+  expect(commands).toEqual([['list'], ['message  go on, then review and recap'], ['maybe']])
   expect(power.isOn).toBe(true)
+})
+
+test('/goon session this stands for the session the command is typed in', async ($, on) => {
+  const { commands } = world(on, limit)
+  await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
+
+  await $.command.run(slash('session this off'))
+  await $.command.run(slash('session 1a2b off'))
+  expect(commands).toEqual([['session sess-1 off'], ['session 1a2b off']])
 })
 
 test('/goon topic, topic new and test run the script and show what it says', async ($, on) => {
@@ -275,7 +321,7 @@ test('/goon topic, topic new and test run the script and show what it says', asy
   expect((await $.command.run(slash('topic new'))).text).toBe('ran topic new')
   expect((await $.command.run(slash(' test '))).text).toBe('ran test')
   expect(ran.map(run => run.args)).toEqual([['topic'], ['topic', 'new'], ['test']])
-  expect(ran[0]?.env).toEqual({})
+  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT })
 })
 
 test('a topic set in the options reaches the script', { options: { ntfy_topic: ' my-topic ' } }, async ($, on) => {
@@ -283,7 +329,7 @@ test('a topic set in the options reaches the script', { options: { ntfy_topic: '
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
   await $.command.run(slash('topic'))
-  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: 'my-topic' })
+  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: 'my-topic', CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT })
 })
 
 test('the access token set in the options reaches the script, so /goon test is sent as the real pushes are', { options: { ntfy_token: ' tk_fake ' } }, async ($, on) => {
@@ -291,5 +337,164 @@ test('the access token set in the options reaches the script, so /goon test is s
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
   await $.command.run(slash('test'))
-  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_NTFY_TOKEN: 'tk_fake' })
+  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_NTFY_TOKEN: 'tk_fake', CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT })
+})
+
+test('the resume message set in the options reaches the script, which decides what is sent', { options: { resume_text: ' carry on ' } }, async ($, on) => {
+  const { ran } = world(on, limit)
+  await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
+
+  await $.command.run(slash('topic'))
+  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: 'carry on' })
+})
+
+test('the message is read from the script when it fires: a change made while waiting is the one sent', async ($, on) => {
+  const { clock, submitted, plan } = world(on, limit)
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  plan.message = 'go on and recap'
+  await clock.advance(RESET - START + MARGIN)
+  expect(submitted).toEqual(['go on and recap'])
+})
+
+test('a message changed while Goon waits for the typing to stop is the one sent after it', async ($, on) => {
+  const { clock, submitted, draft, plan } = world(on, limit)
+  draft.text = 'half a thought'
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  await clock.advance(RESET - START + MARGIN)
+  plan.message = 'go on and wrap up'
+  draft.text = ''
+  await clock.advance(30_000)
+  expect(submitted).toEqual(['go on and wrap up'])
+})
+
+test('a session switched off while waiting is not continued', async ($, on) => {
+  const { clock, store, submitted, plan } = world(on, limit)
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  plan.isOffHere = true
+  await clock.advance(RESET - START + MARGIN)
+  expect(submitted).toEqual([])
+  expect(store.has(KEY)).toBe(false)
+})
+
+test('the choices made for the session are dropped once it was continued', async ($, on) => {
+  const { clock, commands } = world(on, limit)
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  commands.length = 0
+  await clock.advance(RESET - START + MARGIN)
+  expect(commands).toEqual([['session', 'sess-1', 'reset']])
+})
+
+test('a limit stop asks for the session message, the default first, and keeps what is picked', async ($, on) => {
+  const { clock, asked, answers, commands } = world(on, limit)
+  answers.push('go on and recap')
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  expect(asked).toHaveLength(1)
+  expect(asked[0]?.options).toEqual(['go on (default)', 'go on and review', 'go on and recap', 'More presets…'])
+  expect(commands).toEqual([
+    ['session', 'sess-1', 'reset'],
+    ['session', 'sess-1', 'message', 'go on and recap'],
+  ])
+})
+
+test('picking the default keeps no message of its own, so a later change to the default still counts', async ($, on) => {
+  const { clock, answers, commands } = world(on, limit)
+  answers.push('go on (default)')
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  expect(commands).toEqual([['session', 'sess-1', 'reset']])
+})
+
+test('the default is the one the script names, even when it is no preset', async ($, on) => {
+  const { clock, asked, answers, plan } = world(on, limit)
+  plan.message = 'my own default'
+  answers.push(undefined)
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  expect(asked[0]?.options[0]).toBe('my own default (default)')
+  expect(asked[0]?.options).toHaveLength(4)
+  expect(asked[0]?.options).toContain('go on')
+})
+
+test('text typed under Other becomes the message', async ($, on) => {
+  const { clock, answers, commands } = world(on, limit)
+  answers.push('check the logs first')
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  expect(commands.at(-1)).toEqual(['session', 'sess-1', 'message', 'check the logs first'])
+})
+
+test('a dismissed question keeps the default and still arms the resume', async ($, on) => {
+  const { clock, store, submitted, commands } = world(on, limit)
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  expect(commands).toEqual([['session', 'sess-1', 'reset']])
+  expect(store.get(KEY)).toBe(RESET + MARGIN)
+  await clock.advance(RESET - START + MARGIN)
+  expect(submitted).toEqual([TEXT])
+})
+
+test('more presets than the dialog holds come on further pages', async ($, on) => {
+  const { clock, asked, answers, commands, plan } = world(on, limit)
+  plan.presets = [...PRESETS, 'five', 'six']
+  answers.push('More presets…', 'More presets…', 'six')
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  expect(asked.map(page => page.options)).toEqual([
+    ['go on (default)', 'go on and review', 'go on and recap', 'More presets…'],
+    ['go on and wrap up', 'go on, then review and recap', 'go on, then review and wrap up', 'More presets…'],
+    ['five', 'six'],
+  ])
+  expect(commands.at(-1)).toEqual(['session', 'sess-1', 'message', 'six'])
+})
+
+test('a turn the person starts while the question is open drops the answer', async ($, on) => {
+  const { clock, answers, commands, askDelay } = world(on, limit)
+  answers.push('go on and recap')
+  askDelay.ms = 5_000
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  await $.turn.start({ text: 'I am back', turnId: 't2' })
+  await clock.advance(5_000)
+  expect(commands).toEqual([['session', 'sess-1', 'reset']])
+})
+
+test('with Goon off nothing is asked', async ($, on) => {
+  const { clock, asked, power } = world(on, limit)
+  power.isOn = false
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  expect(asked).toEqual([])
+})
+
+test('arming tells goon.py which session and when, so /goon list can show it', async ($, on) => {
+  const { clock, tracked } = world(on, limit)
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  expect(tracked).toEqual([['--session', 'sess-1', '--resume-at', String((RESET + MARGIN) / 1000)]])
+})
+
+test('an error that is no usage limit is not tracked', async ($, on) => {
+  const { clock, tracked } = world(on, '')
+
+  await $.turn.complete(stopped)
+  await clock.settle()
+  expect(tracked).toEqual([])
 })
