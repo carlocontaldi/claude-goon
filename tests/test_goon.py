@@ -334,7 +334,7 @@ class SettingsTest(WithDirs):
     def test_the_resume_text_default_is_the_one_the_manifest_declares(self):
         with mock.patch.dict(os.environ):
             os.environ.pop('CLAUDE_PLUGIN_OPTION_RESUME_TEXT', None)
-            self.assertEqual(goon.read_settings()['resume_text'] or choices.DEFAULT_MESSAGE, 'go on')
+            self.assertEqual(goon.read_settings()['resume_text'] or choices.DEFAULT_MESSAGE, 'Go on')
         self.assertEqual(self.MANIFEST['resume_text']['default'], choices.DEFAULT_MESSAGE)
 
     def test_the_manifest_has_no_fixed_topic(self):
@@ -775,23 +775,23 @@ class ResetCommandTest(WithDirs):
 
 class ChoicesTest(WithDirs):
     def test_the_built_in_presets_include_the_ones_asked_for_and_added_ones_follow(self):
-        choices.add_preset(self.dir, 'go on and test')
+        choices.add_preset(self.dir, 'Go on and test')
         listed = choices.presets(self.dir)
         self.assertEqual(
             listed[:6],
             [
-                'go on',
-                'go on and review',
-                'go on and recap',
-                'go on and wrap up',
-                'go on, then review and recap',
-                'go on, then review and wrap up',
+                'Go on',
+                'Go on and review',
+                'Go on and recap',
+                'Go on and wrap up',
+                'Go on, then review and recap',
+                'Go on, then review and wrap up',
             ],
         )
-        self.assertEqual(listed[6:], ['go on and test'])
+        self.assertEqual(listed[6:], ['Go on and test'])
 
     def test_a_number_picks_a_preset_and_other_text_stands_for_itself(self):
-        self.assertEqual(choices.resolve(self.dir, '3'), 'go on and recap')
+        self.assertEqual(choices.resolve(self.dir, '3'), 'Go on and recap')
         self.assertEqual(choices.resolve(self.dir, '  fix   the tests  '), 'fix the tests')
 
     def test_a_number_without_a_preset_is_refused(self):
@@ -821,7 +821,7 @@ class ChoicesTest(WithDirs):
             choices.remove_preset(self.dir, 'never added')
 
     def test_the_default_message_is_the_saved_one_then_the_option_then_the_built_in(self):
-        self.assertEqual(choices.default_message(self.dir, ''), 'go on')
+        self.assertEqual(choices.default_message(self.dir, ''), 'Go on')
         self.assertEqual(choices.default_message(self.dir, 'from option'), 'from option')
         choices.set_default_message(self.dir, 'saved')
         self.assertEqual(choices.default_message(self.dir, 'from option'), 'saved')
@@ -850,7 +850,7 @@ class ChoicesTest(WithDirs):
         with self.assertRaisesRegex(choices.ChoiceError, 'not a session id'):
             choices.choose(self.dir, '../escape', message='x')
         self.assertEqual(choices.session_choice(self.dir, '../escape'), {})
-        self.assertEqual(choices.message_for(self.dir, '../escape', ''), 'go on')
+        self.assertEqual(choices.message_for(self.dir, '../escape', ''), 'Go on')
 
 
 class SessionInfoTest(WithDirs):
@@ -931,11 +931,11 @@ class ListTest(WithPending):
         self.register()
         text = goon.run_command('list')
         for expected in (
-            '1 interrupted session waiting. Goon is on; it sends "go on" unless a session has its own message.',
+            '1 interrupted session waiting. Goon is on; it sends "Go on" unless a session has its own message.',
             '11111111  Fix the importer',
             f'closed, {self.cwd} (main), 3.4 MB, $1.23 so far, model-a',
             'weekly limit, resets Jan 15, 08:00 UTC',
-            'will send "go on"',
+            'will send "Go on"',
             'last prompt: please fix the importer',
         ):
             self.assertIn(expected, text)
@@ -952,7 +952,7 @@ class ListTest(WithPending):
     def test_the_message_a_session_will_get_and_whether_it_is_switched_off_show(self):
         self.register()
         goon.run_command('session 1111 message 3')
-        self.assertIn('will send "go on and recap" (chosen for this session)', goon.run_command('list'))
+        self.assertIn('will send "Go on and recap" (chosen for this session)', goon.run_command('list'))
         goon.run_command('session 1111 off')
         self.assertIn('switched off for this session: nothing will be sent', goon.run_command('list'))
 
@@ -971,31 +971,31 @@ class ListTest(WithPending):
 class MessageCommandTest(WithPending):
     def test_presets_are_numbered_and_the_default_is_marked(self):
         text = goon.run_command('presets')
-        self.assertIn('1. go on  (default)', text)
-        self.assertIn('5. go on, then review and recap\n', text)
+        self.assertIn('1. Go on  (default)', text)
+        self.assertIn('5. Go on, then review and recap\n', text)
         goon.run_command('message 5')
-        self.assertIn('5. go on, then review and recap  (default)', goon.run_command('presets'))
+        self.assertIn('5. Go on, then review and recap  (default)', goon.run_command('presets'))
 
     def test_a_number_or_text_sets_the_default_for_every_session_until_reset(self):
-        self.assertIn('"go on and recap"', goon.run_command('message 3'))
-        self.assertEqual(choices.default_message(self.dir, ''), 'go on and recap')
+        self.assertIn('"Go on and recap"', goon.run_command('message 3'))
+        self.assertEqual(choices.default_message(self.dir, ''), 'Go on and recap')
         self.assertIn('"fix the tests"', goon.run_command('message fix the tests'))
-        self.assertIn('"go on"', goon.run_command('message default'))
-        self.assertEqual(choices.default_message(self.dir, ''), 'go on')
+        self.assertIn('"Go on"', goon.run_command('message default'))
+        self.assertEqual(choices.default_message(self.dir, ''), 'Go on')
 
     def test_message_alone_shows_it_without_changing_it(self):
         goon.run_command('message 3')
-        self.assertIn('"go on and recap"', goon.run_command('message'))
+        self.assertIn('"Go on and recap"', goon.run_command('message'))
 
     def test_a_bad_number_is_explained_and_changes_nothing(self):
         self.assertIn('There is no preset 9', goon.run_command('message 9'))
-        self.assertEqual(choices.default_message(self.dir, ''), 'go on')
+        self.assertEqual(choices.default_message(self.dir, ''), 'Go on')
 
     def test_presets_are_added_and_removed(self):
-        self.assertEqual(goon.run_command('preset add go on and test'), 'Added "go on and test".')
-        self.assertIn('7. go on and test', goon.run_command('presets'))
-        self.assertEqual(goon.run_command('preset remove 7'), 'Removed "go on and test".')
-        self.assertNotIn('go on and test', goon.run_command('presets'))
+        self.assertEqual(goon.run_command('preset add Go on and test'), 'Added "Go on and test".')
+        self.assertIn('7. Go on and test', goon.run_command('presets'))
+        self.assertEqual(goon.run_command('preset remove 7'), 'Removed "Go on and test".')
+        self.assertNotIn('Go on and test', goon.run_command('presets'))
         self.assertIn('Use /goon preset add', goon.run_command('preset'))
 
     def test_the_default_option_is_the_message_while_nothing_was_set(self):
@@ -1004,9 +1004,9 @@ class MessageCommandTest(WithPending):
 
     def test_free_text_on_the_command_line_is_taken_as_words(self):
         with mock.patch.object(sys, 'stdout', io.StringIO()) as out:
-            goon.main(['command', 'message', 'go', 'on', 'and', 'recap'])
-        self.assertIn('"go on and recap"', out.getvalue())
-        self.assertEqual(choices.default_message(self.dir, ''), 'go on and recap')
+            goon.main(['command', 'message', 'Go', 'on', 'and', 'recap'])
+        self.assertIn('"Go on and recap"', out.getvalue())
+        self.assertEqual(choices.default_message(self.dir, ''), 'Go on and recap')
 
     def test_an_unknown_command_gets_the_usage(self):
         self.assertEqual(goon.run_command('dance'), goon.USAGE)
@@ -1022,12 +1022,12 @@ class SessionCommandTest(WithPending):
 
     def test_a_session_gets_its_own_message_by_number_or_text_and_gives_it_up(self):
         self.register()
-        self.assertEqual(goon.run_command('session 1111 message 4'), '11111111: will send "go on and wrap up".')
-        self.assertEqual(choices.message_for(self.dir, SESSION, ''), 'go on and wrap up')
+        self.assertEqual(goon.run_command('session 1111 message 4'), '11111111: will send "Go on and wrap up".')
+        self.assertEqual(choices.message_for(self.dir, SESSION, ''), 'Go on and wrap up')
         goon.run_command('session 1111 message check the logs')
         self.assertEqual(choices.message_for(self.dir, SESSION, ''), 'check the logs')
         goon.run_command('session 1111 message default')
-        self.assertEqual(choices.message_for(self.dir, SESSION, ''), 'go on')
+        self.assertEqual(choices.message_for(self.dir, SESSION, ''), 'Go on')
 
     def test_reset_drops_every_choice_for_the_session(self):
         self.register()
@@ -1048,8 +1048,8 @@ class SessionCommandTest(WithPending):
         self.assertIn('first four or more characters', goon.run_command('session 11 off'))
 
     def test_a_whole_id_is_accepted_before_the_session_is_registered(self):
-        self.assertEqual(goon.run_command(f'session {OTHER} message 4'), '99999999: will send "go on and wrap up".')
-        self.assertEqual(choices.message_for(self.dir, OTHER, ''), 'go on and wrap up')
+        self.assertEqual(goon.run_command(f'session {OTHER} message 4'), '99999999: will send "Go on and wrap up".')
+        self.assertEqual(choices.message_for(self.dir, OTHER, ''), 'Go on and wrap up')
 
     def test_a_session_command_without_an_action_gets_the_usage(self):
         self.register()
@@ -1069,7 +1069,7 @@ class PlanTest(WithPending):
         return stopped.exception.code
 
     def test_the_plan_is_the_message_and_the_presets_to_pick_from(self):
-        self.assertEqual(self.plan(), {'message': 'go on', 'presets': list(choices.BUILT_IN_PRESETS)})
+        self.assertEqual(self.plan(), {'message': 'Go on', 'presets': list(choices.BUILT_IN_PRESETS)})
 
     def test_the_session_message_and_a_changed_default_show_at_once(self):
         choices.set_default_message(self.dir, 'saved')
@@ -1081,7 +1081,7 @@ class PlanTest(WithPending):
     def test_the_command_exits_with_the_off_code_while_goon_or_the_session_is_off(self):
         choices.choose(self.dir, SESSION, enabled=False)
         self.assertEqual(self.exit_code(), goon.OFF_EXIT)
-        self.assertEqual(self.plan(OTHER)['message'], 'go on')
+        self.assertEqual(self.plan(OTHER)['message'], 'Go on')
         goon.power('off')
         self.assertEqual(self.exit_code(OTHER), goon.OFF_EXIT)
 
@@ -1118,9 +1118,9 @@ class SessionChoicesInTheWatcherTest(WithFakeClaude, WithPending):
         self.assertIsNone(goon.summary(Counter({'session-off': 2}), '5-hour limit'))
 
     def test_the_sessions_own_message_is_what_the_resumed_run_is_sent(self):
-        choices.choose(self.dir, SESSION, message='go on and recap')
+        choices.choose(self.dir, SESSION, message='Go on and recap')
         goon.watch(self.payload())
-        self.assertEqual(json.loads(self.calls.read_text())['message']['message']['content'], 'go on and recap')
+        self.assertEqual(json.loads(self.calls.read_text())['message']['message']['content'], 'Go on and recap')
 
     def test_a_message_changed_while_the_watcher_waits_is_the_one_sent(self):
         goon.register(100, self.record(Path('t.jsonl'), SESSION))
@@ -1128,7 +1128,7 @@ class SessionChoicesInTheWatcherTest(WithFakeClaude, WithPending):
         with mock.patch.object(goon, 'decide', return_value='resume'):
             with mock.patch.object(goon, 'start_supervisor') as start:
                 goon.resume_all(100)
-        self.assertEqual(start.call_args.args[0]['message'], 'go on, then review and recap')
+        self.assertEqual(start.call_args.args[0]['message'], 'Go on, then review and recap')
 
     def test_choices_for_a_handled_session_are_forgotten_but_an_open_ones_are_kept_for_its_mod(self):
         for session_id in (SESSION, OTHER):
@@ -1239,7 +1239,7 @@ class ModOnlyTest(WithPending):
         self.stopped_session()
         goon.track(SESSION, self.resume_at())
         goon.run_command('session 1111 message 4')
-        self.assertIn('will send "go on and wrap up" (chosen for this session)', goon.run_command('list'))
+        self.assertIn('will send "Go on and wrap up" (chosen for this session)', goon.run_command('list'))
         goon.run_command('session 1111 off')
         self.assertIn('switched off for this session', goon.run_command('list'))
 

@@ -3,15 +3,15 @@ import { expect, mock, test } from 'claude-code/testing'
 const START = 1_800_000_000_000
 const RESET = START + 3_600_000
 const MARGIN = 60_000
-const TEXT = 'go on'
+const TEXT = 'Go on'
 const KEY = 'armed:sess-1'
 const PRESETS = [
-  'go on',
-  'go on and review',
-  'go on and recap',
-  'go on and wrap up',
-  'go on, then review and recap',
-  'go on, then review and wrap up',
+  'Go on',
+  'Go on and review',
+  'Go on and recap',
+  'Go on and wrap up',
+  'Go on, then review and recap',
+  'Go on, then review and wrap up',
 ]
 
 const stopped = { reason: 'error', answer: '', durationMs: 1, isAborted: false, turnId: 't1' } as const
@@ -298,9 +298,9 @@ test('/goon with anything else goes to the script as one argument, text and spac
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
   expect((await $.command.run(slash('list'))).text).toBe('done')
-  await $.command.run(slash(' message  go on, then review and recap '))
+  await $.command.run(slash(' message  Go on, then review and recap '))
   await $.command.run(slash('maybe'))
-  expect(commands).toEqual([['list'], ['message  go on, then review and recap'], ['maybe']])
+  expect(commands).toEqual([['list'], ['message  Go on, then review and recap'], ['maybe']])
   expect(power.isOn).toBe(true)
 })
 
@@ -353,9 +353,9 @@ test('the message is read from the script when it fires: a change made while wai
 
   await $.turn.complete(stopped)
   await clock.settle()
-  plan.message = 'go on and recap'
+  plan.message = 'Go on and recap'
   await clock.advance(RESET - START + MARGIN)
-  expect(submitted).toEqual(['go on and recap'])
+  expect(submitted).toEqual(['Go on and recap'])
 })
 
 test('a message changed while Goon waits for the typing to stop is the one sent after it', async ($, on) => {
@@ -365,10 +365,10 @@ test('a message changed while Goon waits for the typing to stop is the one sent 
   await $.turn.complete(stopped)
   await clock.settle()
   await clock.advance(RESET - START + MARGIN)
-  plan.message = 'go on and wrap up'
+  plan.message = 'Go on and wrap up'
   draft.text = ''
   await clock.advance(30_000)
-  expect(submitted).toEqual(['go on and wrap up'])
+  expect(submitted).toEqual(['Go on and wrap up'])
 })
 
 test('a session switched off while waiting is not continued', async ($, on) => {
@@ -394,21 +394,21 @@ test('the choices made for the session are dropped once it was continued', async
 
 test('a limit stop asks for the session message, the default first, and keeps what is picked', async ($, on) => {
   const { clock, asked, answers, commands } = world(on, limit)
-  answers.push('go on and recap')
+  answers.push('Go on and recap')
 
   await $.turn.complete(stopped)
   await clock.settle()
   expect(asked).toHaveLength(1)
-  expect(asked[0]?.options).toEqual(['go on (default)', 'go on and review', 'go on and recap', 'More presets…'])
+  expect(asked[0]?.options).toEqual(['Go on (default)', 'Go on and review', 'Go on and recap', 'More presets…'])
   expect(commands).toEqual([
     ['session', 'sess-1', 'reset'],
-    ['session', 'sess-1', 'message', 'go on and recap'],
+    ['session', 'sess-1', 'message', 'Go on and recap'],
   ])
 })
 
 test('picking the default keeps no message of its own, so a later change to the default still counts', async ($, on) => {
   const { clock, answers, commands } = world(on, limit)
-  answers.push('go on (default)')
+  answers.push('Go on (default)')
 
   await $.turn.complete(stopped)
   await clock.settle()
@@ -424,7 +424,7 @@ test('the default is the one the script names, even when it is no preset', async
   await clock.settle()
   expect(asked[0]?.options[0]).toBe('my own default (default)')
   expect(asked[0]?.options).toHaveLength(4)
-  expect(asked[0]?.options).toContain('go on')
+  expect(asked[0]?.options).toContain('Go on')
 })
 
 test('text typed under Other becomes the message', async ($, on) => {
@@ -455,8 +455,8 @@ test('more presets than the dialog holds come on further pages', async ($, on) =
   await $.turn.complete(stopped)
   await clock.settle()
   expect(asked.map(page => page.options)).toEqual([
-    ['go on (default)', 'go on and review', 'go on and recap', 'More presets…'],
-    ['go on and wrap up', 'go on, then review and recap', 'go on, then review and wrap up', 'More presets…'],
+    ['Go on (default)', 'Go on and review', 'Go on and recap', 'More presets…'],
+    ['Go on and wrap up', 'Go on, then review and recap', 'Go on, then review and wrap up', 'More presets…'],
     ['five', 'six'],
   ])
   expect(commands.at(-1)).toEqual(['session', 'sess-1', 'message', 'six'])
@@ -464,7 +464,7 @@ test('more presets than the dialog holds come on further pages', async ($, on) =
 
 test('a turn the person starts while the question is open drops the answer', async ($, on) => {
   const { clock, answers, commands, askDelay } = world(on, limit)
-  answers.push('go on and recap')
+  answers.push('Go on and recap')
   askDelay.ms = 5_000
 
   await $.turn.complete(stopped)

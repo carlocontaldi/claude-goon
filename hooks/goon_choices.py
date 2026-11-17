@@ -7,14 +7,14 @@ import os
 import re
 from pathlib import Path
 
-DEFAULT_MESSAGE = 'go on'
+DEFAULT_MESSAGE = 'Go on'
 BUILT_IN_PRESETS = (
     DEFAULT_MESSAGE,
-    'go on and review',
-    'go on and recap',
-    'go on and wrap up',
-    'go on, then review and recap',
-    'go on, then review and wrap up',
+    'Go on and review',
+    'Go on and recap',
+    'Go on and wrap up',
+    'Go on, then review and recap',
+    'Go on, then review and wrap up',
 )
 MAX_MESSAGE = 1000
 SESSION_ID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')

@@ -15,7 +15,7 @@ Two halves share the work, so a session is brought back whether or not its windo
 
 The watcher then pushes one line to a private ntfy topic naming the limit, such as `5-hour limit reset: resumed 2 closed sessions, 1 open session left to the Goon mod inside.`
 
-What a session is sent is yours to set: presets such as `go on and recap`, a default for every session, and a message for each session on its own. See [Choose what is sent](#choose-what-is-sent) and [See what is waiting](#see-what-is-waiting).
+What a session is sent is yours to set: presets such as `Go on and recap`, a default for every session, and a message for each session on its own. See [Choose what is sent](#choose-what-is-sent) and [See what is waiting](#see-what-is-waiting).
 
 Claude Code 2.1.319 also has a built-in wait (`/rate-limit-options`, "Wait here, then continue automatically"). It is per session, you choose it by hand each time, and the session has to stay open. Goon arms itself, and also covers sessions that were closed.
 
@@ -44,13 +44,13 @@ Goon is on by default. In any session, `/goon off` stops it everywhere, `/goon o
 
 ## Choose what is sent
 
-Six presets are built in, in this order: `go on`, `go on and review`, `go on and recap`, `go on and wrap up`, `go on, then review and recap` and `go on, then review and wrap up`. `/goon presets` lists them with numbers. `/goon preset add <text>` adds one of your own and `/goon preset remove <number or text>` removes it again; yours are kept in `~/.claude/goon/presets.json`, and the built-in six cannot be removed.
+Six presets are built in, in this order: `Go on`, `Go on and review`, `Go on and recap`, `Go on and wrap up`, `Go on, then review and recap` and `Go on, then review and wrap up`. `/goon presets` lists them with numbers. `/goon preset add <text>` adds one of your own and `/goon preset remove <number or text>` removes it again; yours are kept in `~/.claude/goon/presets.json`, and the built-in six cannot be removed.
 
 Three levels decide the text, the most specific first:
 
 1. The message chosen for one session.
 2. The default message, set with `/goon message <number or text>`. It stays until `/goon message default`, so it also covers limits that happen later. `/goon message` alone shows it.
-3. The *Resume message* option below, or `go on` when that is empty.
+3. The *Resume message* option below, or `Go on` when that is empty.
 
 A number picks that preset; any other text is sent as typed, up to 1,000 characters.
 
@@ -74,19 +74,19 @@ To change a session's choice later:
 `/goon list` shows the interrupted sessions Goon will continue, soonest reset first:
 
 ```
-2 interrupted sessions waiting. Goon is on; it sends "go on, then review and recap" unless a session has its own message.
+2 interrupted sessions waiting. Goon is on; it sends "Go on, then review and recap" unless a session has its own message.
 
 9c04d7aa  Review the pricing page
   open, /home/dev/web (feature/pricing), 0.8 MB, $2.10 so far, claude-sonnet-5-5
   5-hour limit, resets Nov 17, 01:00 UTC
   only the Goon mod inside the session continues it, at Nov 17, 01:01 UTC
-  will send "go on, then review and recap"
+  will send "Go on, then review and recap"
   last prompt: tighten the copy
 
 3f2a1b9c  Fix the importer
   closed, /home/dev/importer (main), 3.3 MB, $12.40 so far, claude-opus-5-5
   weekly limit, resets Nov 17, 03:00 UTC
-  will send "go on and recap" (chosen for this session)
+  will send "Go on and recap" (chosen for this session)
   last prompt: please fix the importer
 ```
 
@@ -100,18 +100,18 @@ In any session:
 
 ```
 /goon presets                                  # the presets, numbered, the default marked
-/goon message 5                                # every session gets "go on, then review and recap"
-/goon message check the logs, then go on       # any other text is sent as typed
+/goon message 5                                # every session gets "Go on, then review and recap"
+/goon message Check the logs, then go on       # any other text is sent as typed
 /goon message default                          # back to the Resume message option
 
 /goon list                                     # what is waiting, with the ids
 /goon session 3f2a off                         # leave that session alone at the reset
 /goon session 3f2a on                          # ...or change your mind
 /goon session 3f2a message 6                   # that session gets preset 6 instead
-/goon session this message go on and recap     # the session you are typing in
+/goon session this message Go on and recap     # the session you are typing in
 /goon session 3f2a reset                       # drop both choices for that session
 
-/goon preset add go on and run the tests       # becomes preset 7
+/goon preset add Go on and run the tests       # becomes preset 7
 /goon preset remove 7
 ```
 
@@ -129,7 +129,7 @@ All eight values are optional.
 
 | Value | Meaning |
 |---|---|
-| Resume message | What an interrupted session is sent when nothing more specific was chosen. Default: `go on`. `/goon message` overrides it. |
+| Resume message | What an interrupted session is sent when nothing more specific was chosen. Default: `Go on`. `/goon message` overrides it. |
 | Wait while you are typing | On by default. An open session is not continued while its prompt box holds a draft. Closed sessions have no prompt box, so it does not apply to them. |
 | Quiet hours | Off by default. A daily window such as `22:00-07:00` (24 h, this machine's clock) or `22:00-07:00 Europe/Lisbon`, in which nothing is resumed. A limit that resets inside it is acted on when the window ends, for open and closed sessions alike. An invalid window is logged and ignored. |
 | Permission mode for closed sessions | `acceptEdits`, `auto`, `dontAsk`, `plan` or `manual`, for headless resumes. Unset uses your settings, so a default mode of `bypassPermissions` there would apply to the unattended run. Anything else set here, `bypassPermissions` included, is ignored. |

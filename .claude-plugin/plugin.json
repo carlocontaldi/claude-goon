@@ -12,7 +12,7 @@
       "type": "string",
       "title": "Resume message",
       "description": "What Goon sends to an interrupted session once its limit has reset, unless a message was chosen with /goon message or for that session.",
-      "default": "go on",
+      "default": "Go on",
       "required": false
     },
     "resume_permission_mode": {
