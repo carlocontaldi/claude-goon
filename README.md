@@ -15,6 +15,8 @@ Two halves share the work, so a session is brought back whether or not its windo
 
 The watcher then pushes one line to a private ntfy topic naming the limit, such as `5-hour limit reset: resumed 2 closed sessions, 1 open session left to the Goon mod inside.`
 
+What a session is sent is yours to set: presets such as `go on and recap`, a default for every session, and a message for each session on its own. See [Choose what is sent](#choose-what-is-sent) and [See what is waiting](#see-what-is-waiting).
+
 Claude Code 2.1.319 also has a built-in wait (`/rate-limit-options`, "Wait here, then continue automatically"). It is per session, you choose it by hand each time, and the session has to stay open. Goon arms itself, and also covers sessions that were closed.
 
 ## Requirements
@@ -40,25 +42,107 @@ claude plugin install goon --marketplace carlocontaldi/claude-goon
 
 Goon is on by default. In any session, `/goon off` stops it everywhere, `/goon on` starts it again and `/goon status` says which it is. The switch is the file `~/.claude/goon/off`, so it covers every open session and the closed-session watcher until you flip it back. It is read when Goon is about to resume something, so turning it on before a reset still resumes that session, and turning it off stops resumes that have not started. A resume already running is not stopped.
 
+## Choose what is sent
+
+Six presets are built in, in this order: `go on`, `go on and review`, `go on and recap`, `go on and wrap up`, `go on, then review and recap` and `go on, then review and wrap up`. `/goon presets` lists them with numbers. `/goon preset add <text>` adds one of your own and `/goon preset remove <number or text>` removes it again; yours are kept in `~/.claude/goon/presets.json`, and the built-in six cannot be removed.
+
+Three levels decide the text, the most specific first:
+
+1. The message chosen for one session.
+2. The default message, set with `/goon message <number or text>`. It stays until `/goon message default`, so it also covers limits that happen later. `/goon message` alone shows it.
+3. The *Resume message* option below, or `go on` when that is empty.
+
+A number picks that preset; any other text is sent as typed, up to 1,000 characters.
+
+Goon reads the message when it is about to send it, not when it saw the limit. A change made while a reset is still hours away therefore applies to every session waiting for it. A resume that has already started keeps the message it started with.
+
+When a limit stops a session that has the Goon mod loaded, the session asks what to send it. The question lists the presets with the default first, goes on to a second page (`More presets…`) when there are more than four (the six built-in ones already need it), and takes your own text in its free-text field. Dismissing it keeps the default. Picking the default option also keeps it, and pins nothing, so a later change to the default still applies. The choice is kept for that session, whether it is still open at the reset or has been closed by then.
+
+To change a session's choice later:
+
+| Command | Effect |
+|---|---|
+| `/goon session <id> message <number or text>` | The session gets this message. |
+| `/goon session <id> message default` | The session gets the default message again. |
+| `/goon session <id> off` | Goon leaves the session alone at the reset. `on` undoes it. |
+| `/goon session <id> reset` | Drops both choices. |
+
+`<id>` is the first four or more characters of the session id, as `/goon list` shows it. Typed in a session, `this` stands for that session's own id. A session's choices last for that interruption: Goon drops them once it has handled or continued the session, and at the session's next limit stop.
+
+## See what is waiting
+
+`/goon list` shows the interrupted sessions Goon will continue, soonest reset first:
+
+```
+2 interrupted sessions waiting. Goon is on; it sends "go on, then review and recap" unless a session has its own message.
+
+9c04d7aa  Review the pricing page
+  open, /home/dev/web (feature/pricing), 0.8 MB, $2.10 so far, claude-sonnet-5-5
+  5-hour limit, resets Nov 17, 01:00 UTC
+  only the Goon mod inside the session continues it, at Nov 17, 01:01 UTC
+  will send "go on, then review and recap"
+  last prompt: tighten the copy
+
+3f2a1b9c  Fix the importer
+  closed, /home/dev/importer (main), 3.3 MB, $12.40 so far, claude-opus-5-5
+  weekly limit, resets Nov 17, 03:00 UTC
+  will send "go on and recap" (chosen for this session)
+  last prompt: please fix the importer
+```
+
+An entry gives the first eight characters of the id and the session's title (Claude Code's own, or the folder name when it has none), then whether the session is open or closed, its folder and git branch, the size of its transcript (a guide to how much a resume re-reads), its cost so far, its model, the limit and its reset time, the message it will get or that it is switched off, and its last prompt. Goon reads the title, prompt, branch, model, cost and size from the transcript when it sees the limit and keeps them in `~/.claude/goon/pending/`. Open or closed and the message are worked out again each time you list.
+
+Two entries carry an extra line. A session that has already moved on shows `already continued: Goon will leave it alone`. A session that only the mod inside it knows about (the `StopFailure` hook did not register it, so no watcher has it) shows `only the Goon mod inside the session continues it, at <time>` while it is open. Once it is closed it shows `no watcher has it and it is closed: nothing continues it unless you reopen it before <time>`. For these, Goon lists what the transcript says; the commands below work on them like on any other session. The mod's notes are kept in `~/.claude/goon/armed/`, left out of the list a day after their resume time and removed the next time the mod arms a session.
+
+## Examples
+
+In any session:
+
+```
+/goon presets                                  # the presets, numbered, the default marked
+/goon message 5                                # every session gets "go on, then review and recap"
+/goon message check the logs, then go on       # any other text is sent as typed
+/goon message default                          # back to the Resume message option
+
+/goon list                                     # what is waiting, with the ids
+/goon session 3f2a off                         # leave that session alone at the reset
+/goon session 3f2a on                          # ...or change your mind
+/goon session 3f2a message 6                   # that session gets preset 6 instead
+/goon session this message go on and recap     # the session you are typing in
+/goon session 3f2a reset                       # drop both choices for that session
+
+/goon preset add go on and run the tests       # becomes preset 7
+/goon preset remove 7
+```
+
+From a shell, in the plugin folder (the same commands, for when every session is stopped):
+
+```
+python3 hooks/goon.py command list
+python3 hooks/goon.py command session 3f2a message 6
+python3 hooks/goon.py plan --session <whole session id>    # what would be sent now; exit code 3 while off
+```
+
 ## Configure
 
-All seven values are optional.
+All eight values are optional.
 
 | Value | Meaning |
 |---|---|
-| Resume message | What an interrupted session is sent. Default: `go on`. |
+| Resume message | What an interrupted session is sent when nothing more specific was chosen. Default: `go on`. `/goon message` overrides it. |
 | Wait while you are typing | On by default. An open session is not continued while its prompt box holds a draft. Closed sessions have no prompt box, so it does not apply to them. |
 | Quiet hours | Off by default. A daily window such as `22:00-07:00` (24 h, this machine's clock) or `22:00-07:00 Europe/Lisbon`, in which nothing is resumed. A limit that resets inside it is acted on when the window ends, for open and closed sessions alike. An invalid window is logged and ignored. |
 | Permission mode for closed sessions | `acceptEdits`, `auto`, `dontAsk`, `plan` or `manual`, for headless resumes. Unset uses your settings, so a default mode of `bypassPermissions` there would apply to the unattended run. Anything else set here, `bypassPermissions` included, is ignored. |
+| Name sessions in notifications | Off by default. When on, the push and email also list each session by title (or folder name) with what Goon did with it, for example `- Fix the importer: resumed`. One setting for all sessions. |
 | ntfy topic | Optional. Empty: a private topic Goon makes, `claude-goon-<random>` (see below). Set a name to use your own. |
 | Notification email | Also have ntfy email the summary. |
 | ntfy access token | Needed only for the email: ntfy.sh refuses emails from anonymous requests. |
 
 > **Warning: a resume inherits your permission mode, and nobody is there to check it.** An open session continues under its own mode. A closed one is resumed headless under the mode your settings give it, unless the option above is set. If that mode is `bypassPermissions` (no prompts at all), `auto` (a classifier approves actions) or `acceptEdits` (file edits are approved), the unattended run does what it allows without asking. Changing the mode before your credits run out is up to you; set the option to `manual` to pin the mode that asks, and Goon holds those prompts instead.
 
-A closed session that reaches a permission prompt is paused, not refused: Goon keeps the prompt open and pushes `A resumed session is waiting on a permission prompt for <tool>.` The run is ended after 24 hours. Answering the prompt from Goon is not built yet. With an email set, Goon sends one email per limit reset and one more for each resumed session that reaches a prompt; [Claude Portavoce](https://github.com/carlocontaldi/claude-portavoce) sends its own, and the free ntfy tier allows five emails a day.
+A closed session that reaches a permission prompt is paused, not refused: Goon keeps the prompt open and pushes `A resumed session is waiting on a permission prompt for <tool>.` (with *Name sessions in notifications* on, `"<title>"` replaces `A resumed session`). The run is ended after 24 hours. Answering the prompt from Goon is not built yet. With an email set, Goon sends one email per limit reset and one more for each resumed session that reaches a prompt; [Claude Portavoce](https://github.com/carlocontaldi/claude-portavoce) sends its own, and the free ntfy tier allows five emails a day.
 
-What leaves your machine: one HTTPS request to ntfy.sh (or `GOON_NTFY_URL`) per reset, with the topic in the URL, your email and token in headers, and a one-line body of counts (or the tool's name, for a prompt). No project names, paths or session ids.
+What leaves your machine: one HTTPS request to ntfy.sh (or `GOON_NTFY_URL`) per reset, with the topic in the URL, your email and token in headers, and a one-line body of counts (or the tool's name, for a prompt). No project names, paths or session ids. With *Name sessions in notifications* on, the body also has one line per session (at most eight) with its title or folder name. Claude Code writes the title from your conversation, so it can name a project or a customer, and anyone who knows the topic can read it.
 
 ## Set up ntfy
 
@@ -73,21 +157,23 @@ Change a value from a shell; options you leave out keep their values:
 ```
 claude plugin configure goon@claude-goon          # shows which are set
 echo '{"ntfy_topic": "my-own-topic"}' | claude plugin configure goon@claude-goon --values-stdin
+echo '{"push_details": "true"}' | claude plugin configure goon@claude-goon --values-stdin     # name sessions in notifications
 echo '{"ntfy_topic": ""}' | claude plugin configure goon@claude-goon --values-stdin     # back to the private topic
 ```
 
 ## Check it
 
-`~/.claude/goon/log.txt` records each limit seen, each session's outcome (`continued`, `open`, `resumed`, `unknown`, `no-cwd`, `gave-up`, ...), each push and each exit code. The stderr of each headless resume is in `~/.claude/goon/runs/`. Set `GOON_DIR` to use another folder.
+`~/.claude/goon/log.txt` records each limit seen, each session's outcome (`continued`, `open`, `resumed`, `session-off`, `unknown`, `no-cwd`, `gave-up`, ...), each push and each exit code. The stderr of each headless resume is in `~/.claude/goon/runs/`. Your choices are in the same folder: `message.json` (the default message), `presets.json` and `sessions/<id>.json`. Set `GOON_DIR` to use another folder.
 
 A session is resumed at most four times a day, so one that keeps hitting a limit is not looped forever. On a cloud machine the clock is often UTC, which is what quiet hours without a zone mean there.
 
 ## Limits
 
-- Not yet seen on a real limit: that the VS Code panel delivers a `turn.complete` with `reason: 'error'` for a usage-limit stop, and how the mod and the built-in wait interact when both are armed. The `StopFailure` hook is known to fire on real 5-hour and weekly limits, which Portavoce relies on. A headless resume of a real session, and the plugin loading in a real session, were run; the rest is covered by tests against fake `claude` and ntfy.
+- Not yet seen on a real limit: that the VS Code panel delivers a `turn.complete` with `reason: 'error'` for a usage-limit stop, how the mod and the built-in wait interact when both are armed, and the question that asks for a session's message (tested against a mocked dialog; the `/goon` commands were run in a real `claude -p` session). The `StopFailure` hook is known to fire on real 5-hour and weekly limits, which Portavoce relies on. A headless resume of a real session, and the plugin loading in a real session, were run; the rest is covered by tests against fake `claude` and ntfy.
 - A paused prompt cannot be answered yet: the session stays paused until its run is ended after 24 hours or you stop it.
 - A headless resume loads the whole conversation again, as continuing by hand would. Several large sessions resumed together can use a lot of the window.
 - An open session without the mod loaded (started before the plugin was installed) is reported, not resumed.
+- A session only the mod knows about is continued while it stays open. If it is closed before its resume time, nothing continues it, because no watcher was started for it.
 - A reboot or shutdown ends a pending watcher, and nothing re-arms it.
 - The watcher waits for a window limit up to 8 days and for a spend cap up to 35; a reset further off is logged and not watched.
 
