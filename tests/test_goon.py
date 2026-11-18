@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from collections import Counter
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -59,6 +60,14 @@ def limit_row(at=NOW, reset=None, text="You've hit your 5-hour limit · resets 1
 
 def chat_row(kind='assistant', at=NOW, **extra):
     return {'type': kind, 'timestamp': stamp(at), 'message': {'role': kind, 'content': 'x'}, **extra}
+
+
+def together(*managers):
+    """One context manager entering all of `managers`, for a `with` that stays valid on Python 3.9."""
+    stack = ExitStack()
+    for manager in managers:
+        stack.enter_context(manager)
+    return stack
 
 
 class WithDirs(unittest.TestCase):
@@ -282,6 +291,29 @@ def utc(*args):
     return datetime(*args, tzinfo=timezone.utc)
 
 
+class MergedTextTest(unittest.TestCase):
+    five, weekly = lw.Cap('five_hour', utc(2026, 11, 17, 10)), lw.Cap('weekly', utc(2026, 11, 20, 3))
+
+    def test_portavoces_announcement_comes_first_and_the_limit_is_named_once(self):
+        self.assertEqual(
+            goon.merged_text([self.five], [], Counter(resumed=2, open=1)),
+            'Your 5-hour limit has reset. You can continue.'
+            ' Goon: resumed 2 closed sessions, 1 open session left to the Goon mod inside.',
+        )
+
+    def test_a_cap_still_in_force_stays_in_the_announcement(self):
+        self.assertEqual(
+            goon.merged_text([self.five], [self.weekly], Counter(resumed=1)),
+            'Your 5-hour limit has reset. Still in force: weekly limit (until Nov 20, 03:00 UTC).'
+            ' Goon: resumed 1 closed session.',
+        )
+
+    def test_the_phrases_are_the_ones_the_summary_joins(self):
+        outcomes = Counter(resumed=1, **{'gave-up': 1})
+        self.assertEqual(goon.summary_parts(outcomes), ['resumed 1 closed session', '1 skipped, see the log'])
+        self.assertEqual(goon.summary_parts(Counter(continued=2)), [])
+
+
 class AfterQuietTest(unittest.TestCase):
     def test_a_time_outside_the_window_is_left_alone(self):
         t = utc(2026, 11, 11, 12, 0)
@@ -487,6 +519,7 @@ class WithFakeClaude(WithDirs):
             'FAKE_CALLS': str(self.calls),
             'CLAUDE_PLUGIN_OPTION_NTFY_TOPIC': 'secret-topic',
             'CLAUDE_PLUGIN_OPTION_RESUME_TEXT': 'carry on',
+            'MERIDIANA_DIR': str(self.root / 'meridiana'),
         }
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
@@ -650,6 +683,196 @@ class WatchTest(WithFakeClaude):
         [(_, headers, body)] = self.server.requests
         self.assertEqual((headers['Email'], headers['Authorization']), ('me@example.com', 'Bearer tk_secret'))
         self.assertNotIn(b'me@example.com', body)
+
+    def email_env(self):
+        return mock.patch.dict(
+            os.environ,
+            {'CLAUDE_PLUGIN_OPTION_NOTIFY_EMAIL': 'me@example.com', 'CLAUDE_PLUGIN_OPTION_NTFY_TOKEN': 'tk_secret'},
+        )
+
+    def portavoce_leaves(self, restored, pending, email='me@example.com'):
+        """Stand in for Portavoce's watcher: its note appears beside Goon's offer while Goon waits."""
+        note = {'v': 1, 'restored': lw.encode_caps(restored), 'pending': lw.encode_caps(pending)}
+
+        def wait(until):
+            for offer in (self.root / 'meridiana' / 'handover').glob('*.offer'):
+                if json.loads(offer.read_text())['email'] == lw.email_key(email):
+                    lw.write_new(offer.with_suffix('.note'), note)
+
+        return mock.patch.object(goon, 'sleep_until', side_effect=wait)
+
+    def handover_files(self, suffix):
+        return list((self.root / 'meridiana' / 'handover').glob(f'*.{suffix}'))
+
+    def test_portavoces_announcement_and_goons_summary_leave_in_one_email(self):
+        five = lw.Cap('five_hour', datetime.now(timezone.utc))
+        with self.email_env(), self.portavoce_leaves([five], []):
+            goon.watch(self.payload())
+        [(path, headers, body)] = self.server.requests
+        self.assertEqual(path, '/secret-topic')
+        self.assertEqual(headers['Email'], 'me@example.com')
+        self.assertEqual((headers['Title'], headers['Tags']), ('Claude limit restored', 'parrot,service_dog'))
+        self.assertEqual(body, b'Your 5-hour limit has reset. You can continue. Goon: resumed 1 closed session.')
+        self.assertEqual(len(self.handover_files('sent')), 1)
+
+    def test_the_session_lines_follow_the_merged_text(self):
+        five = lw.Cap('five_hour', datetime.now(timezone.utc))
+        env = {'CLAUDE_PLUGIN_OPTION_PUSH_DETAILS': 'true'}
+        with self.email_env(), mock.patch.dict(os.environ, env), self.portavoce_leaves([five], []):
+            goon.watch(self.payload())
+        [(_, _, body)] = self.server.requests
+        self.assertTrue(body.startswith(b'Your 5-hour limit has reset. You can continue. Goon: resumed 1 closed'))
+        self.assertTrue(body.endswith(b'\n- project: resumed'))
+
+    def test_a_note_for_another_address_is_not_read(self):
+        five = lw.Cap('five_hour', datetime.now(timezone.utc))
+        with self.email_env(), self.portavoce_leaves([five], [], email='you@example.com'):
+            goon.watch(self.payload())
+        [(_, headers, body)] = self.server.requests
+        self.assertEqual(headers['Title'], 'Claude Goon')
+        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
+
+    def test_without_a_note_the_email_is_goons_own(self):
+        with self.email_env():
+            goon.watch(self.payload())
+        [(_, headers, body)] = self.server.requests
+        self.assertEqual((headers['Title'], headers['Tags']), ('Claude Goon', 'service_dog,arrow_forward'))
+        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
+        self.assertEqual(len(self.handover_files('sent')), 1)  # so a note that comes late is known to be covered
+
+    def test_when_portavoce_decided_to_email_first_goon_pushes_without_an_email(self):
+        def portavoce_decides(until):
+            for offer in (self.root / 'meridiana' / 'handover').glob('*.offer'):
+                lw.write_new(offer.with_suffix('.verdict'), {'v': 1, 'by': 'portavoce'})
+
+        with self.email_env(), mock.patch.object(goon, 'sleep_until', side_effect=portavoce_decides):
+            goon.watch(self.payload())
+        [(_, headers, body)] = self.server.requests
+        self.assertNotIn('Email', headers)
+        self.assertEqual(headers['Title'], 'Claude Goon')
+        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
+        self.assertEqual(self.handover_files('sent'), [])
+
+    def test_with_nothing_to_report_the_note_stays_for_portavoce_to_send(self):
+        goon.power('off')
+        five = lw.Cap('five_hour', datetime.now(timezone.utc))
+        with self.email_env(), self.portavoce_leaves([five], []):
+            goon.watch(self.payload())
+        self.assertEqual(self.server.requests, [])
+        self.assertEqual(len(self.handover_files('note')), 1)
+        self.assertEqual(self.handover_files('verdict'), [])
+
+    def test_a_push_that_fails_leaves_the_note_for_portavoce_to_send(self):
+        five = lw.Cap('five_hour', datetime.now(timezone.utc))
+        with together(
+            self.email_env(),
+            self.portavoce_leaves([five], []),
+            mock.patch.object(goon, 'ntfy_push', return_value=False),
+        ):
+            goon.watch(self.payload())
+        self.assertEqual(len(self.handover_files('note')), 1)
+        self.assertEqual(self.handover_files('sent'), [])
+
+    def test_the_offer_stands_while_goon_waits_and_goes_when_it_is_done(self):
+        seen = []
+        quiet = datetime.now(timezone.utc) + timedelta(hours=3)
+
+        def wait(until):
+            seen.append(sorted(p.name for p in (self.root / 'meridiana' / 'handover').glob('*.offer')))
+
+        with together(
+            self.email_env(),
+            mock.patch.object(goon, 'sleep_until', side_effect=wait),
+            mock.patch.object(goon, 'after_quiet', return_value=quiet),
+        ):
+            goon.watch(self.payload())
+        self.assertEqual(seen[0], [f'{int(quiet.timestamp())}.offer'])
+        self.assertEqual(list((self.root / 'meridiana' / 'handover').glob('*.offer')), [])
+
+    def test_goon_claims_the_email_before_it_resumes_anything(self):
+        claimed = []
+        real = goon.resume_all
+
+        def resume_all(epoch):
+            claimed.append(len(self.handover_files('verdict')))
+            return real(epoch)
+
+        with self.email_env(), mock.patch.object(goon, 'resume_all', resume_all):
+            goon.watch(self.payload())
+        self.assertEqual(claimed, [1])
+
+    def test_while_off_goon_claims_nothing(self):
+        goon.power('off')
+        with self.email_env():
+            goon.watch(self.payload())
+        self.assertEqual(self.handover_files('verdict'), [])
+
+    def portavoce_comes_late(self, restored, delay):
+        """Stand in for a Portavoce watcher that is awake but leaves its note `delay` seconds after Goon starts."""
+        note = {'v': 1, 'restored': lw.encode_caps(restored), 'pending': []}
+        started = []
+
+        def wait(until):
+            offers = list((self.root / 'meridiana' / 'handover').glob('*.offer'))
+            if started or not offers:
+                return
+            offer = offers[0]
+            at = datetime.fromtimestamp(json.loads(offer.read_text())['at'], timezone.utc)
+            intent = lw.Intent(at, 'me@example.com', self.root / 'meridiana').open()
+            started.append(intent)
+
+            def leave():
+                threading.Event().wait(delay)
+                lw.write_new(offer.with_suffix('.note'), note)
+                intent.close()
+
+            threading.Thread(target=leave, daemon=True).start()
+
+        return mock.patch.object(goon, 'sleep_until', side_effect=wait)
+
+    def test_a_portavoce_that_has_not_left_its_note_yet_is_waited_for(self):
+        five = lw.Cap('five_hour', datetime.now(timezone.utc))
+        with self.email_env(), self.portavoce_comes_late([five], 0.3):
+            goon.watch(self.payload())
+        [(_, headers, body)] = self.server.requests
+        self.assertEqual(headers['Title'], 'Claude limit restored')
+        self.assertEqual(body, b'Your 5-hour limit has reset. You can continue. Goon: resumed 1 closed session.')
+
+    def test_goon_does_not_wait_when_no_portavoce_is_coming(self):
+        real_wait = goon.Offer.wait_note
+        with self.email_env(), mock.patch.object(goon.Offer, 'wait_note', autospec=True, side_effect=real_wait) as wait:
+            goon.watch(self.payload())
+        wait.assert_called_once()
+        [(_, headers, _)] = self.server.requests
+        self.assertEqual(headers['Title'], 'Claude Goon')
+
+    def test_an_unusable_shared_folder_costs_only_the_merge(self):
+        blocked = self.root / 'blocked'
+        blocked.write_text('a file where the folder should be')
+        with self.email_env(), mock.patch.dict(os.environ, {'MERIDIANA_DIR': str(blocked)}):
+            with self.assertLogs('goon', 'INFO') as logged:
+                goon.watch(self.payload())
+        self.assertTrue(self.calls.exists())
+        [(_, headers, body)] = self.server.requests
+        self.assertEqual((headers['Email'], headers['Title']), ('me@example.com', 'Claude Goon'))
+        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
+        self.assertIn('no hand-over: NotADirectoryError', '\n'.join(logged.output))
+
+    def test_a_claim_that_fails_still_resumes_and_sends_goons_own_email(self):
+        with self.email_env(), mock.patch.object(goon.Offer, 'claim', side_effect=PermissionError):
+            goon.watch(self.payload())
+        self.assertTrue(self.calls.exists())
+        [(_, headers, body)] = self.server.requests
+        self.assertEqual((headers['Email'], headers['Title']), ('me@example.com', 'Claude Goon'))
+
+    def test_a_sent_mark_that_cannot_be_written_does_not_undo_the_email(self):
+        with self.email_env(), mock.patch.object(goon.Offer, 'delivered', side_effect=PermissionError):
+            goon.watch(self.payload())
+        self.assertEqual(len(self.server.requests), 1)
+
+    def test_with_no_email_set_there_is_no_offer(self):
+        goon.watch(self.payload())
+        self.assertFalse((self.root / 'meridiana').exists())
 
     def test_a_push_without_email_carries_neither_header(self):
         goon.watch(self.payload())

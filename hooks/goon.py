@@ -37,6 +37,8 @@ from goon_limits import is_blocked, is_open, session_info
 from goon_quiet import after_quiet, parse_quiet
 from limitwatch import (
     MARGIN,
+    Offer,
+    announcement,
     claim,
     effective_topic,
     format_reset,
@@ -45,6 +47,7 @@ from limitwatch import (
     sleep_until,
     stored_topic,
     subscribe_steps,
+    try_open,
 )
 from limitwatch import push as ntfy_push
 
@@ -356,18 +359,29 @@ def count(n: int, noun: str) -> str:
     return f'{n} {noun}' if n == 1 else f'{n} {noun}s'
 
 
-def summary(outcomes: Counter, label: str) -> str | None:
-    """One line saying which limit reset and what Goon did, or None when every session had already continued."""
+def summary_parts(outcomes: Counter) -> list[str]:
+    """What Goon did with the sessions, as phrases; empty when every session had already continued."""
     parts = []
     if outcomes['resumed']:
         parts.append(f'resumed {count(outcomes["resumed"], "closed session")}')
     if outcomes['open']:
         parts.append(f'{count(outcomes["open"], "open session")} left to the Goon mod inside')
     quiet = ('resumed', 'open', 'continued', 'off', 'session-off')
-    skipped = sum(n for label, n in outcomes.items() if label not in quiet)
+    skipped = sum(n for outcome, n in outcomes.items() if outcome not in quiet)
     if skipped:
         parts.append(f'{skipped} skipped, see the log')
+    return parts
+
+
+def summary(outcomes: Counter, label: str) -> str | None:
+    """One line saying which limit reset and what Goon did, or None when every session had already continued."""
+    parts = summary_parts(outcomes)
     return f'{label[0].upper()}{label[1:]} reset: {", ".join(parts)}.' if parts else None
+
+
+def merged_text(restored: list, pending: list, outcomes: Counter) -> str:
+    """Portavoce's announcement, then what Goon did: the limit that reset is named once."""
+    return f'{announcement(restored, pending)} Goon: {", ".join(summary_parts(outcomes))}.'
 
 
 OUTCOME_PHRASES = {
@@ -396,16 +410,16 @@ def session_lines(results: list[tuple[dict, str]]) -> str:
     return '\n'.join(lines)
 
 
-def push(text: str, settings: dict[str, str]) -> None:
-    ntfy_push(
+def push(text: str, settings: dict[str, str], merged: bool = False, with_email: bool = True) -> bool:
+    return ntfy_push(
         NTFY_URL,
         settings['ntfy_topic'],
         text,
         logger.info,
-        title='Claude Goon',
-        tags='service_dog,arrow_forward',
+        title='Claude limit restored' if merged else 'Claude Goon',
+        tags='parrot,service_dog' if merged else 'service_dog,arrow_forward',
         icon=ICON_URL,
-        email=settings['notify_email'],
+        email=settings['notify_email'] if with_email else '',
         token=settings['ntfy_token'],
     )
 
@@ -604,18 +618,71 @@ def watch(payload: dict) -> None:
     resume_at = after_quiet(cap.reset + MARGIN, settings['quiet_hours'])
     logger.info('%s; will resume at %s', cap.label, resume_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
     results: list[tuple[dict, str]] = []
-    while fd is not None:
-        try:
-            sleep_until(resume_at)
-            results += resume_all(epoch)
-        finally:
-            release(fd, marker)
-        # A session registered after our last look found the lock held and left it to us.
-        fd = claim(marker) if has_pending(epoch) else None
-    if text := summary(Counter(outcome for _, outcome in results), cap.label):
-        if wants_details(settings) and (lines := session_lines(results)):
-            text = f'{text}\n{lines}'
-        push(text, settings)
+    offer = try_open(Offer(resume_at, settings['notify_email']), logger.info) if can_email(settings) else None
+    owns = None
+    try:
+        while fd is not None:
+            try:
+                sleep_until(resume_at)
+                if owns is None and offer and is_enabled() and has_pending(epoch):
+                    owns = claim_email(offer)  # before the resumes, so Portavoce can push to the phone at once
+                results += resume_all(epoch)
+            finally:
+                release(fd, marker)
+            # A session registered after our last look found the lock held and left it to us.
+            fd = claim(marker) if has_pending(epoch) else None
+        send_report(results, cap.label, settings, offer, owns)
+    finally:
+        if offer:
+            offer.close()
+
+
+def can_email(settings: dict[str, str]) -> bool:
+    return bool(settings['notify_email'] and settings['ntfy_token'])
+
+
+def claim_email(offer: Offer) -> bool:
+    """Decide that Goon sends the email: False when Portavoce decided to send its own, True when the folder fails."""
+    try:
+        return offer.claim()
+    except OSError as error:
+        logger.info('no hand-over: %s', type(error).__name__)
+        return True
+
+
+def merge_note(offer: Offer) -> tuple[list, list] | None:
+    """Portavoce's announcement, waited for while its watcher is known to be coming."""
+    try:
+        return offer.wait_note()
+    except OSError as error:
+        logger.info('no hand-over: %s', type(error).__name__)
+        return None
+
+
+def mark_sent(offer: Offer) -> None:
+    try:
+        offer.delivered()
+    except OSError as error:
+        logger.info('no hand-over: %s', type(error).__name__)
+
+
+def send_report(
+    results: list[tuple[dict, str]], label: str, settings: dict[str, str], offer: Offer | None, owns: bool | None
+) -> None:
+    """Push what Goon did, with Portavoce's announcement in front when its watcher left one for this email."""
+    outcomes = Counter(outcome for _, outcome in results)
+    text = summary(outcomes, label)
+    if text is None:
+        return  # nothing to say: Portavoce sends its own email
+    if owns is None:  # Goon did not claim at the reset, but has something to say now
+        owns = claim_email(offer) if offer else True
+    note = merge_note(offer) if offer and owns else None
+    if note:
+        text = merged_text(*note, outcomes)
+    if wants_details(settings) and (lines := session_lines(results)):
+        text = f'{text}\n{lines}'
+    if push(text, settings, merged=note is not None, with_email=owns) and offer and owns:
+        mark_sent(offer)
 
 
 def session_transcript(session_id: str) -> str | None:

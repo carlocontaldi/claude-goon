@@ -1,10 +1,11 @@
 # Vendored from claude-meridiana: edit it there and run sync.py.
-# body sha256: d9a4941e81b9701644bbcf138c2f34ae283b1eea5481968a8fc6bd495c983e51
+# body sha256: e09cd0a6755d3825dc76889e4f5cd9e1f38a9f1eb9d60fc9aabee5e32e74231a
 """Reading a Claude Code usage-limit error, waiting for its reset and pushing to ntfy; shared by Portavoce and Goon."""
 
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import http.client
 import json
 import os
@@ -28,6 +29,12 @@ DAY, WEEK = timedelta(days=1), timedelta(days=7)
 CREDIT_WAIT = timedelta(days=35)  # a spend cap may reset weekly or monthly
 PUSH_ATTEMPTS = 3
 PUSH_RETRY_WAIT = 30  # seconds between attempts
+MERGE_WINDOW = timedelta(seconds=5)  # emails planned this close together are sent as one
+HANDOVER_WAIT = 600  # seconds Portavoce waits for Goon to claim or send the merged email
+NOTE_WAIT = 120  # seconds Goon waits for a Portavoce that is known to be coming
+SENDING_WAIT = 7200  # seconds Portavoce waits for a Goon that claimed the email to finish resuming and send it
+HANDOVER_POLL = 1
+HANDOVER_VERSION = 1
 
 # rateLimitType in the error's rate_limit_info, and the label Claude Code itself gives each limit.
 KINDS = {
@@ -113,6 +120,26 @@ def describe_caps(caps: list[Cap]) -> str:
 def format_reset(reset: datetime) -> str:
     utc = reset.astimezone(timezone.utc)
     return f'{utc:%b} {utc.day}, {utc:%H:%M} UTC'
+
+
+def announcement(restored: list[Cap], pending: list[Cap]) -> str:
+    """Which caps have reset and which still hold; a spend cap only blocks the credit fallback, not the plan."""
+    names = describe_caps(restored)
+    if len(restored) == 1:
+        text = f'Your {names} has reset.'
+    else:
+        text = f'Your {names} have {"both" if len(restored) == 2 else "all"} reset.'
+    holding = [cap for cap in pending if cap.kind not in CREDIT_KINDS]
+    capped = [cap for cap in pending if cap.kind in CREDIT_KINDS]
+    if holding:
+        text += (
+            ' Still in force: ' + ', '.join(f'{cap.label} (until {format_reset(cap.reset)})' for cap in holding) + '.'
+        )
+    else:
+        text += ' You can continue.'
+    if capped:
+        text += f' Usage credits stay capped by your {capped[0].label} until {format_reset(capped[0].reset)}.'
+    return text
 
 
 def parse_reset(text: str, at: datetime) -> datetime | None:
@@ -369,4 +396,270 @@ def push(
             if attempt < PUSH_ATTEMPTS:
                 time.sleep(PUSH_RETRY_WAIT)
     log('gave up pushing')
+    return False
+
+
+def shared_dir() -> Path:
+    """The folder Portavoce and Goon meet in, beside Claude Code's own files."""
+    override = os.environ.get('MERIDIANA_DIR')
+    return (
+        Path(override)
+        if override
+        else Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude') / 'meridiana'
+    )
+
+
+def email_key(email: str) -> str:
+    """A short fingerprint of an address: enough to tell two apart, not to read it back."""
+    return hashlib.sha256(email.strip().lower().encode()).hexdigest()[:16]
+
+
+def is_held(path: Path) -> bool:
+    """True while some process holds the lock on `path`."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def write_new(path: Path, data: dict) -> bool:
+    """Create `path` with `data` in one step; False if it already exists."""
+    scratch = path.with_name(f'{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp')
+    scratch.write_text(json.dumps(data))
+    try:
+        os.link(scratch, path)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        scratch.unlink(missing_ok=True)
+
+
+def sweep(folder: Path, age: float = 86400) -> None:
+    """Remove hand-over files a day old; an offer or intent is only removed once nothing holds it."""
+    for path in folder.glob('*'):
+        try:
+            if time.time() - path.stat().st_mtime > age and not (
+                path.suffix in ('.offer', '.intent') and is_held(path)
+            ):
+                path.unlink()
+        except OSError:
+            pass
+
+
+def read_json(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get('v') == HANDOVER_VERSION else None
+
+
+class Held:
+    """A file saying that a watcher lives and when it plans to email, locked for as long as it does."""
+
+    suffix = ''
+
+    def __init__(self, at: datetime, email: str, directory: Path | None = None) -> None:
+        self.at = at
+        self.email = email_key(email)
+        self.base = directory
+        self.folder = (directory or shared_dir()) / 'handover'
+        self.path = self.folder / f'{int(at.timestamp())}{self.suffix}'
+        self.fd: int | None = None
+
+    def open(self) -> Held:
+        self.folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        sweep(self.folder)
+        self.clear()
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        os.ftruncate(self.fd, 0)
+        plan = {'v': HANDOVER_VERSION, 'at': int(self.at.timestamp()), 'email': self.email}
+        os.write(self.fd, json.dumps(plan).encode())
+        return self
+
+    def clear(self) -> None:
+        """Remove what a watcher that died left for this time."""
+
+    def close(self) -> None:
+        if self.fd is not None:
+            release(self.fd, self.path)
+            self.fd = None
+
+    def __enter__(self) -> Held:
+        return self.open()
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+class Intent(Held):
+    """Portavoce's plan to push at `at`, so that a Goon about to email knows an announcement is coming."""
+
+    suffix = '.intent'
+
+
+class Offer(Held):
+    """Goon's offer to carry Portavoce's news in the email it sends at `at`."""
+
+    suffix = '.offer'
+
+    def __init__(self, at: datetime, email: str, directory: Path | None = None) -> None:
+        super().__init__(at, email, directory)
+        self.note = self.path.with_suffix('.note')
+        self.verdict = self.path.with_suffix('.verdict')
+        self.sent = self.path.with_suffix('.sent')
+
+    def clear(self) -> None:
+        for leftover in (self.note, self.verdict, self.sent):
+            leftover.unlink(missing_ok=True)  # the verdict and the sent mark of a watcher that ended stay until then
+
+    def read_note(self) -> tuple[list[Cap], list[Cap]] | None:
+        """The caps Portavoce left to announce: those that reset, and those still in force."""
+        data = read_json(self.note)
+        if data is None:
+            return None
+        try:
+            restored, pending = decode_caps(data['restored']), decode_caps(data['pending'])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return (restored, pending) if restored else None
+
+    def wait_note(self, patience: float = NOTE_WAIT) -> tuple[list[Cap], list[Cap]] | None:
+        """The note, waiting for it while a Portavoce known to be coming (its intent is held) has not left it yet."""
+        deadline = time.monotonic() + patience
+        while True:
+            coming = find_held('.intent', self.at, self.email, self.base) is not None  # read before the note
+            note = self.read_note()
+            if note or not coming or time.monotonic() >= deadline:
+                return note
+            time.sleep(HANDOVER_POLL)
+
+    def claim(self) -> bool:
+        """Decide that Goon sends the email; False when Portavoce already decided to send its own."""
+        return write_new(self.verdict, {'v': HANDOVER_VERSION, 'by': 'goon'})
+
+    def delivered(self) -> None:
+        """Tell Portavoce the email went out, even if it only looks once Goon's watcher has ended."""
+        write_new(self.sent, {'v': HANDOVER_VERSION, 'at': int(self.at.timestamp()), 'email': self.email})
+
+
+def try_open(held: Held, log: Callable[[str], None]) -> Held | None:
+    """Open a hand-over file; None, with a line in the log, when the shared folder cannot be used."""
+    try:
+        return held.open()
+    except OSError as error:
+        log(f'no hand-over: {describe(error)}')
+        held.close()
+        return None
+
+
+def encode_caps(caps: list[Cap]) -> list[list]:
+    return [[cap.kind, int(cap.reset.timestamp())] for cap in caps]
+
+
+def decode_caps(raw: list[list]) -> list[Cap]:
+    return [Cap(str(kind), datetime.fromtimestamp(reset, timezone.utc)) for kind, reset in raw]
+
+
+def find_held(suffix: str, at: datetime, key: str, directory: Path | None = None) -> Path | None:
+    """The live file of a watcher that plans something for the address with this key within MERGE_WINDOW of `at`."""
+    for path in sorted(((directory or shared_dir()) / 'handover').glob(f'*{suffix}')):
+        plan = read_json(path)
+        if not plan or plan.get('email') != key:
+            continue
+        if abs(plan.get('at', 0) - at.timestamp()) <= MERGE_WINDOW.total_seconds() and is_held(path):
+            return path
+    return None
+
+
+def goon_already_sent(at: datetime, email: str, directory: Path | None = None) -> bool:
+    """True when a Goon that has since ended emailed the same address within MERGE_WINDOW of `at`."""
+    for path in (directory or shared_dir()).joinpath('handover').glob('*.sent'):
+        sent = read_json(path)
+        if sent and sent.get('email') == email_key(email):
+            if abs(sent.get('at', 0) - at.timestamp()) <= MERGE_WINDOW.total_seconds():
+                return True
+    return False
+
+
+def hand_over(
+    at: datetime,
+    restored: list[Cap],
+    pending: list[Cap],
+    email: str,
+    log: Callable[[str], None],
+    *,
+    on_goon: Callable[[], None],
+    directory: Path | None = None,
+    wait: float = HANDOVER_WAIT,
+    sending_wait: float = SENDING_WAIT,
+) -> bool:
+    """Leave the announcement with a Goon about to email the same address; True when Goon sends the email.
+    `on_goon` runs once, as soon as the email is known to be Goon's, so the caller can still push to the phone."""
+    try:
+        return negotiate(at, restored, pending, email, log, on_goon, directory, wait, sending_wait)
+    except OSError as error:  # the shared folder is a convenience: without it the caller sends its own email
+        log(f'hand-over failed: {describe(error)}')
+        return False
+
+
+def negotiate(
+    at: datetime,
+    restored: list[Cap],
+    pending: list[Cap],
+    email: str,
+    log: Callable[[str], None],
+    on_goon: Callable[[], None],
+    directory: Path | None,
+    wait: float,
+    sending_wait: float,
+) -> bool:
+    """The hand-over itself: one verdict file decides who emails, so a late answer or a timeout cannot make both."""
+    offer = find_held('.offer', at, email_key(email), directory)
+    if offer is None:  # checked after the offer: a Goon that ended wrote its sent mark before it ended
+        sent = goon_already_sent(at, email, directory)
+        if sent:
+            on_goon()
+        return sent
+    note, verdict, sent_mark = (offer.with_suffix(suffix) for suffix in ('.note', '.verdict', '.sent'))
+    if not write_new(note, {'v': HANDOVER_VERSION, 'restored': encode_caps(restored), 'pending': encode_caps(pending)}):
+        return False
+    log('left the announcement with Goon')
+    deadline = time.monotonic() + wait
+    while True:
+        alive = is_held(offer)  # read before the verdict: a claim always comes before the watcher ends
+        owner = (read_json(verdict) or {}).get('by')
+        if owner == 'goon':
+            on_goon()
+            return goon_sends(offer, sent_mark, sending_wait, log)
+        if not alive or time.monotonic() >= deadline:
+            took = write_new(verdict, {'v': HANDOVER_VERSION, 'by': 'portavoce'})
+            if took or owner is not None or not alive:
+                note.unlink(missing_ok=True)
+                log('Goon did not send the announcement')
+                return False
+        else:
+            time.sleep(HANDOVER_POLL)
+
+
+def goon_sends(offer: Path, sent: Path, patience: float, log: Callable[[str], None]) -> bool:
+    """Wait for the Goon that claimed the email to end; True unless it ended without sending."""
+    deadline = time.monotonic() + patience
+    while is_held(offer):
+        if time.monotonic() >= deadline:
+            log('Goon is still sending; leaving the email to it')
+            return True
+        time.sleep(HANDOVER_POLL)
+    if sent.exists():
+        return True
+    log('Goon could not send the announcement')
     return False
