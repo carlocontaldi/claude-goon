@@ -12,6 +12,7 @@ import unittest
 from collections import Counter
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
+from email.header import decode_header, make_header
 from pathlib import Path
 from unittest import mock
 
@@ -23,7 +24,16 @@ import goon_limits as limits  # noqa: E402
 import goon_quiet as quiet  # noqa: E402
 import limitwatch as lw  # noqa: E402
 
+
+def title_of(headers):
+    """The title as ntfy reads it: emoji travel as an RFC 2047 word."""
+    return str(make_header(decode_header(headers['Title'])))
+
+
 NOW = datetime(2026, 10, 29, 21, 40, tzinfo=timezone.utc)
+RESUMED_TITLE = '🐕‍🦺▶️ Interrupted Claude sessions resumed'
+MERGED_TITLE = '🐕‍🦺▶️ Claude limit restored, interrupted sessions resumed'
+SIGNED = '\n\n— Claude Goon'  # ends every email, never a push to the phone alone
 SESSION = '11111111-2222-3333-4444-555555555555'
 TWIN = '11111111-9999-3333-4444-555555555555'  # shares its first eight characters with SESSION
 OTHER = '99999999-aaaa-bbbb-cccc-dddddddddddd'
@@ -183,12 +193,13 @@ class PendingTest(WithDirs):
 
 
 class AllowResumeTest(WithDirs):
-    def test_a_fifth_resume_within_a_day_is_refused(self):
-        self.assertEqual([goon.allow_resume(SESSION, NOW) for _ in range(5)], [True, True, True, True, False])
+    def test_a_sixth_resume_within_a_day_is_refused(self):
+        self.assertEqual([goon.allow_resume(SESSION, NOW) for _ in range(6)], [True] * 5 + [False])
 
     def test_the_count_starts_over_after_a_day(self):
-        for _ in range(4):
+        for _ in range(5):
             goon.allow_resume(SESSION, NOW)
+        self.assertFalse(goon.allow_resume(SESSION, NOW))
         self.assertTrue(goon.allow_resume(SESSION, NOW + timedelta(days=1, seconds=1)))
 
     def test_an_unreadable_history_starts_over_and_is_rewritten(self):
@@ -564,7 +575,8 @@ class SuperviseTest(WithFakeClaude):
         self.assertEqual(json.loads(self.calls.read_text())['after'], '')
         self.assertNotEqual(code, 0)
         self.assertIn('waiting on a permission prompt for Write', '\n'.join(logged.output))
-        [(_, _, body)] = self.server.requests
+        [(_, headers, body)] = self.server.requests
+        self.assertEqual(title_of(headers), '🐕‍🦺 Claude Goon')
         self.assertEqual(body, b'A resumed session is waiting on a permission prompt for Write.')
 
 
@@ -586,7 +598,7 @@ class WatchTest(WithFakeClaude):
         self.assertEqual(record['message']['message']['content'], 'carry on')
         [(path, headers, body)] = self.server.requests
         self.assertEqual(path, '/secret-topic')
-        self.assertEqual((headers['Title'], headers['Tags']), ('Claude Goon', 'service_dog,arrow_forward'))
+        self.assertEqual((title_of(headers), headers.get('Tags')), (RESUMED_TITLE, None))
         self.assertEqual(headers['Icon'], goon.ICON_URL)
         self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
         self.assertEqual([p.name for p in self.dir.glob('*.lock')], [])
@@ -711,8 +723,9 @@ class WatchTest(WithFakeClaude):
         [(path, headers, body)] = self.server.requests
         self.assertEqual(path, '/secret-topic')
         self.assertEqual(headers['Email'], 'me@example.com')
-        self.assertEqual((headers['Title'], headers['Tags']), ('Claude limit restored', 'parrot,service_dog'))
-        self.assertEqual(body, b'Your 5-hour limit has reset. You can continue. Goon: resumed 1 closed session.')
+        self.assertEqual((title_of(headers), headers.get('Tags')), (MERGED_TITLE, None))
+        merged = 'Your 5-hour limit has reset. You can continue. Goon: resumed 1 closed session.'
+        self.assertEqual(body, (merged + SIGNED).encode())
         self.assertEqual(len(self.handover_files('sent')), 1)
 
     def test_the_session_lines_follow_the_merged_text(self):
@@ -722,22 +735,22 @@ class WatchTest(WithFakeClaude):
             goon.watch(self.payload())
         [(_, _, body)] = self.server.requests
         self.assertTrue(body.startswith(b'Your 5-hour limit has reset. You can continue. Goon: resumed 1 closed'))
-        self.assertTrue(body.endswith(b'\n- project: resumed'))
+        self.assertTrue(body.endswith(('\n- project: resumed' + SIGNED).encode()))
 
     def test_a_note_for_another_address_is_not_read(self):
         five = lw.Cap('five_hour', datetime.now(timezone.utc))
         with self.email_env(), self.portavoce_leaves([five], [], email='you@example.com'):
             goon.watch(self.payload())
         [(_, headers, body)] = self.server.requests
-        self.assertEqual(headers['Title'], 'Claude Goon')
-        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
+        self.assertEqual(title_of(headers), RESUMED_TITLE)
+        self.assertEqual(body, ('5-hour limit reset: resumed 1 closed session.' + SIGNED).encode())
 
     def test_without_a_note_the_email_is_goons_own(self):
         with self.email_env():
             goon.watch(self.payload())
         [(_, headers, body)] = self.server.requests
-        self.assertEqual((headers['Title'], headers['Tags']), ('Claude Goon', 'service_dog,arrow_forward'))
-        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
+        self.assertEqual((title_of(headers), headers.get('Tags')), (RESUMED_TITLE, None))
+        self.assertEqual(body, ('5-hour limit reset: resumed 1 closed session.' + SIGNED).encode())
         self.assertEqual(len(self.handover_files('sent')), 1)  # so a note that comes late is known to be covered
 
     def test_when_portavoce_decided_to_email_first_goon_pushes_without_an_email(self):
@@ -749,7 +762,7 @@ class WatchTest(WithFakeClaude):
             goon.watch(self.payload())
         [(_, headers, body)] = self.server.requests
         self.assertNotIn('Email', headers)
-        self.assertEqual(headers['Title'], 'Claude Goon')
+        self.assertEqual(title_of(headers), RESUMED_TITLE)
         self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
         self.assertEqual(self.handover_files('sent'), [])
 
@@ -835,8 +848,9 @@ class WatchTest(WithFakeClaude):
         with self.email_env(), self.portavoce_comes_late([five], 0.3):
             goon.watch(self.payload())
         [(_, headers, body)] = self.server.requests
-        self.assertEqual(headers['Title'], 'Claude limit restored')
-        self.assertEqual(body, b'Your 5-hour limit has reset. You can continue. Goon: resumed 1 closed session.')
+        self.assertEqual(title_of(headers), MERGED_TITLE)
+        merged = 'Your 5-hour limit has reset. You can continue. Goon: resumed 1 closed session.'
+        self.assertEqual(body, (merged + SIGNED).encode())
 
     def test_goon_does_not_wait_when_no_portavoce_is_coming(self):
         real_wait = goon.Offer.wait_note
@@ -844,7 +858,7 @@ class WatchTest(WithFakeClaude):
             goon.watch(self.payload())
         wait.assert_called_once()
         [(_, headers, _)] = self.server.requests
-        self.assertEqual(headers['Title'], 'Claude Goon')
+        self.assertEqual(title_of(headers), RESUMED_TITLE)
 
     def test_an_unusable_shared_folder_costs_only_the_merge(self):
         blocked = self.root / 'blocked'
@@ -854,8 +868,8 @@ class WatchTest(WithFakeClaude):
                 goon.watch(self.payload())
         self.assertTrue(self.calls.exists())
         [(_, headers, body)] = self.server.requests
-        self.assertEqual((headers['Email'], headers['Title']), ('me@example.com', 'Claude Goon'))
-        self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.')
+        self.assertEqual((headers['Email'], title_of(headers)), ('me@example.com', RESUMED_TITLE))
+        self.assertEqual(body, ('5-hour limit reset: resumed 1 closed session.' + SIGNED).encode())
         self.assertIn('no hand-over: NotADirectoryError', '\n'.join(logged.output))
 
     def test_a_claim_that_fails_still_resumes_and_sends_goons_own_email(self):
@@ -863,7 +877,7 @@ class WatchTest(WithFakeClaude):
             goon.watch(self.payload())
         self.assertTrue(self.calls.exists())
         [(_, headers, body)] = self.server.requests
-        self.assertEqual((headers['Email'], headers['Title']), ('me@example.com', 'Claude Goon'))
+        self.assertEqual((headers['Email'], title_of(headers)), ('me@example.com', RESUMED_TITLE))
 
     def test_a_sent_mark_that_cannot_be_written_does_not_undo_the_email(self):
         with self.email_env(), mock.patch.object(goon.Offer, 'delivered', side_effect=PermissionError):

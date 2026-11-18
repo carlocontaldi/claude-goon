@@ -58,7 +58,7 @@ DIR = Path(os.environ.get('GOON_DIR') or CLAUDE_DIR / 'goon')
 NTFY_URL = (os.environ.get('GOON_NTFY_URL') or 'https://ntfy.sh').rstrip('/') + '/'
 STAGGER = 15  # seconds between launches: each resume re-reads a whole conversation
 STALE_NOTE = 24 * 3600  # seconds after its resume time that a note of the mod's is still listed
-MAX_RESUMES = 4  # per session and day, so a session that keeps hitting a limit is not looped forever
+MAX_RESUMES = 5  # per session and day, so a session that keeps hitting a limit is not looped forever
 LOOKUP_TRIES = 10  # the limit error may not be in the transcript yet when the hook fires
 TOPIC_PREFIX = 'claude-goon'
 ICON_URL = 'https://raw.githubusercontent.com/carlocontaldi/claude-goon/main/assets/goon-icon-64.png'
@@ -254,7 +254,7 @@ def supervise(job: dict, settings: dict[str, str]) -> int:
                 tool = str(request.get('tool_name', 'a tool'))
                 logger.info('%s: waiting on a permission prompt for %s', name, tool)
                 who = f'"{job["label"]}"' if job.get('label') and wants_details(settings) else 'A resumed session'
-                push(f'{who} is waiting on a permission prompt for {tool}.', settings)
+                push(f'{who} is waiting on a permission prompt for {tool}.', settings, PROMPT_TITLE)
                 timer = threading.Timer(PROMPT_WAIT, process.kill)
                 timer.start()
         elif event.get('type') == 'result':
@@ -396,6 +396,10 @@ OUTCOME_PHRASES = {
     'failed': 'failed, see the log',
 }
 MAX_DETAIL_LINES = 8
+# The emoji are part of the title: ntfy puts the emoji of tags before it with spaces between them.
+RESUMED_TITLE = '🐕‍🦺▶️ Interrupted Claude sessions resumed'
+MERGED_TITLE = '🐕‍🦺▶️ Claude limit restored, interrupted sessions resumed'
+PROMPT_TITLE = '🐕‍🦺 Claude Goon'
 
 
 def session_lines(results: list[tuple[dict, str]]) -> str:
@@ -410,17 +414,17 @@ def session_lines(results: list[tuple[dict, str]]) -> str:
     return '\n'.join(lines)
 
 
-def push(text: str, settings: dict[str, str], merged: bool = False, with_email: bool = True) -> bool:
+def push(text: str, settings: dict[str, str], title: str, with_email: bool = True) -> bool:
     return ntfy_push(
         NTFY_URL,
         settings['ntfy_topic'],
         text,
         logger.info,
-        title='Claude limit restored' if merged else 'Claude Goon',
-        tags='parrot,service_dog' if merged else 'service_dog,arrow_forward',
+        title=title,
         icon=ICON_URL,
         email=settings['notify_email'] if with_email else '',
         token=settings['ntfy_token'],
+        signature='Claude Goon',
     )
 
 
@@ -681,7 +685,8 @@ def send_report(
         text = merged_text(*note, outcomes)
     if wants_details(settings) and (lines := session_lines(results)):
         text = f'{text}\n{lines}'
-    if push(text, settings, merged=note is not None, with_email=owns) and offer and owns:
+    title = MERGED_TITLE if note else RESUMED_TITLE
+    if push(text, settings, title, with_email=owns) and offer and owns:
         mark_sent(offer)
 
 
