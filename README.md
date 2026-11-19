@@ -9,7 +9,13 @@
 >
 > *Probably short for English dialect* gooney, *a simpleton. Here the name also runs together* go on.
 
+<br>
+
 A Claude Code plugin that tells interrupted sessions to go on. When a usage limit stops a session, Goon waits for the reset time the limit message states, then sends the session a resume message. The waiting costs no tokens; only the resumed turn does.
+
+<p1 align="center">
+  <img src="assets/goon-banner.png" alt="" width="1280"><br>
+</p1>
 
 Two halves share the work, so a session is brought back whether or not its window is still open:
 
