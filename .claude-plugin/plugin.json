@@ -60,6 +60,13 @@
       "description": "Optional. Needed only for the email; ntfy.sh refuses emails from anonymous requests.",
       "required": false,
       "sensitive": true
+    },
+    "show_dog": {
+      "type": "boolean",
+      "title": "Show the dog emoji",
+      "description": "On by default. Includes \ud83d\udc15\ud83e\uddba at the start of ntfy push and email titles; turn off for plain titles. The in-session question chip and toasts keep the emoji.",
+      "default": true,
+      "required": false
     }
   }
 }

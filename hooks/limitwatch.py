@@ -1,10 +1,11 @@
 # Vendored from claude-meridiana: edit it there and run sync.py.
-# body sha256: 77f8bdc587a701fef1063b048d8835af3c61ede2a73064d2c3abb0b297c6ded9
+# body sha256: 6cd2596ea40a8a47c30743b598691a05e1b44362281afb999b01ce66fcd72c78
 """Reading a Claude Code usage-limit error, waiting for its reset and pushing to ntfy; shared by Portavoce and Goon."""
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import fcntl
 import hashlib
 import http.client
@@ -17,7 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +36,9 @@ HANDOVER_WAIT = 600  # seconds Portavoce waits for Goon to claim or send the mer
 NOTE_WAIT = 120  # seconds Goon waits for a Portavoce that is known to be coming
 SENDING_WAIT = 7200  # seconds Portavoce waits for a Goon that claimed the email to finish resuming and send it
 HANDOVER_POLL = 1
+ANCHORS_FILE = 'monthly_anchors.json'
+ANCHORS_LOCK = 'monthly_anchors.lock'
+MAX_ANCHORS = 4  # monthly reset moments kept
 HANDOVER_VERSION = 1
 
 # rateLimitType in the error's rate_limit_info, and the label Claude Code itself gives each limit.
@@ -176,7 +180,7 @@ def epoch(value: object) -> datetime | None:
         return None
 
 
-def spend_kind(info: dict, reset: datetime, at: datetime | None) -> str:
+def spend_kind(info: dict, reset: datetime, at: datetime | None, anchors: Collection[tuple[int, int, int]] = ()) -> str:
     """A spend cap's kind with its period: from the error's own flags, else from how far off the reset is."""
     monthly = info.get('overagePeriodMonthly')
     if info.get('dailyCapPaused'):
@@ -185,10 +189,46 @@ def spend_kind(info: dict, reset: datetime, at: datetime | None) -> str:
         return 'monthly'
     if at is None:
         return 'spend'
-    wait, utc = reset - at, reset.astimezone(timezone.utc)
-    if wait > WEEK + timedelta(hours=1) or (utc.day, utc.hour, utc.minute) == (1, 0, 0):
+    wait, moment = reset - at, reset_moment(reset)
+    if wait > WEEK + timedelta(hours=1) or moment == (1, 0, 0) or moment in anchors:
         return 'monthly'  # a weekly cap is never further off than a week; a monthly one resets at the turn of the month
     return 'spend_weekly' if wait > DAY else 'spend'
+
+
+def reset_moment(reset: datetime) -> tuple[int, int, int]:
+    """The day of the month and the UTC time of a reset: what a monthly cap repeats."""
+    utc = reset.astimezone(timezone.utc)
+    return utc.day, utc.hour, utc.minute
+
+
+def load_anchors() -> list[tuple[int, int, int]]:
+    """The monthly reset moments seen before, oldest first; none when the file is missing or unreadable."""
+    try:
+        raw = json.loads((shared_dir() / ANCHORS_FILE).read_text())
+        return [(day, hour, minute) for day, hour, minute in raw]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def learn_anchor(reset: datetime) -> None:
+    """Keep the moment of a monthly reset, so a later one near its time is still told from a weekly one."""
+    moment = reset_moment(reset)
+    if moment == (1, 0, 0):
+        return
+    folder = shared_dir()
+    scratch = folder / f'{ANCHORS_FILE}.{os.getpid()}.{secrets.token_hex(4)}.tmp'
+    try:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open(folder / ANCHORS_LOCK, 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)  # Portavoce and Goon may both learn at once: read inside the lock
+            known = load_anchors()
+            if moment in known:
+                return
+            scratch.write_text(json.dumps([*known, moment][-MAX_ANCHORS:]))
+            os.replace(scratch, folder / ANCHORS_FILE)
+    except OSError:  # the anchors only sharpen a guess: losing them costs nothing
+        with contextlib.suppress(OSError):
+            scratch.unlink()
 
 
 def caps_from_info(info: dict, at: datetime | None = None) -> list[Cap]:
@@ -197,8 +237,11 @@ def caps_from_info(info: dict, at: datetime | None = None) -> list[Cap]:
     kind = KINDS.get(raw, str(raw or 'usage'))
     spend = SPEND_REASONS.get(info.get('overageDisabledReason'))
     overage_reset = epoch(info.get('overageResetsAt'))
+    anchors = load_anchors() if spend and overage_reset else []
     if spend == 'spend' and overage_reset:
-        spend = spend_kind(info, overage_reset, at)
+        spend = spend_kind(info, overage_reset, at, anchors)
+    if spend == 'monthly' and overage_reset:
+        learn_anchor(overage_reset)
     if kind == 'credits' and spend:
         kind = spend  # the credit limit itself is the one reached: name it as Claude Code does
     reset = epoch(info.get('resetsAt')) or (overage_reset if kind in CREDIT_KINDS else None)

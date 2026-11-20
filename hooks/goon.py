@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -89,7 +90,7 @@ def has_pending(epoch: int) -> bool:
 
 
 def take_pending(epoch: int) -> list[dict]:
-    """Remove and return the sessions registered for this reset; an unreadable record is dropped and logged."""
+    """Remove and return the sessions registered for this reset, smallest first; unreadable records are dropped."""
     folder = DIR / 'pending' / str(epoch)
     records = []
     for entry in sorted(folder.glob('*.json')):
@@ -102,6 +103,7 @@ def take_pending(epoch: int) -> list[dict]:
         folder.rmdir()
     except OSError:
         pass  # missing, or a session registered meanwhile
+    records.sort(key=lambda record: record.get('size') or float('inf'))  # smallest first, so the quota reaches more
     return records
 
 
@@ -199,6 +201,7 @@ def read_settings() -> dict[str, str]:
         'notify_email',
         'ntfy_token',
         'push_details',
+        'show_dog',
     )
     settings = {n: option(n) for n in names}
     settings['ntfy_topic'] = effective_topic(settings['ntfy_topic'], DIR / 'topic', TOPIC_PREFIX)
@@ -207,6 +210,10 @@ def read_settings() -> dict[str, str]:
 
 def wants_details(settings: dict[str, str]) -> bool:
     return settings['push_details'].lower() in ('true', '1', 'yes', 'on')
+
+
+def shows_dog(settings: dict[str, str]) -> bool:
+    return settings['show_dog'].lower() not in ('false', '0', 'no', 'off')
 
 
 def resume_argv(binary: str, session_id: str, settings: dict[str, str]) -> list[str]:
@@ -415,6 +422,8 @@ def session_lines(results: list[tuple[dict, str]]) -> str:
 
 
 def push(text: str, settings: dict[str, str], title: str, with_email: bool = True) -> bool:
+    if not shows_dog(settings):
+        title = re.sub(r'^\W+', '', title)  # the emoji the title starts with
     return ntfy_push(
         NTFY_URL,
         settings['ntfy_topic'],
@@ -447,7 +456,7 @@ def send_test(settings: dict[str, str]) -> str:
         'Claude Goon test: if you can read this, the topic works.',
         logger.info,
         title='Claude Goon test',
-        tags='service_dog,bell',
+        tags='service_dog,bell' if shows_dog(settings) else 'bell',
         icon=ICON_URL,
         token=settings['ntfy_token'],
     )

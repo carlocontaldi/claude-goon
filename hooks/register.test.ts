@@ -325,7 +325,7 @@ test('/goon topic, topic new and test run the script and show what it says', asy
   expect((await $.command.run(slash('topic new'))).text).toBe('ran topic new')
   expect((await $.command.run(slash(' test '))).text).toBe('ran test')
   expect(ran.map(run => run.args)).toEqual([['topic'], ['topic', 'new'], ['test']])
-  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT })
+  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT, CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true' })
 })
 
 test('a topic set in the options reaches the script', { options: { ntfy_topic: ' my-topic ' } }, async ($, on) => {
@@ -333,7 +333,11 @@ test('a topic set in the options reaches the script', { options: { ntfy_topic: '
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
   await $.command.run(slash('topic'))
-  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: 'my-topic', CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT })
+  expect(ran[0]?.env).toEqual({
+    CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: 'my-topic',
+    CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT,
+    CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true',
+  })
 })
 
 test('the access token set in the options reaches the script, so /goon test is sent as the real pushes are', { options: { ntfy_token: ' tk_fake ' } }, async ($, on) => {
@@ -341,7 +345,19 @@ test('the access token set in the options reaches the script, so /goon test is s
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
   await $.command.run(slash('test'))
-  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_NTFY_TOKEN: 'tk_fake', CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT })
+  expect(ran[0]?.env).toEqual({
+    CLAUDE_PLUGIN_OPTION_NTFY_TOKEN: 'tk_fake',
+    CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT,
+    CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true',
+  })
+})
+
+test('the dog option reaches the script, so /goon test drops the emoji tag as the real pushes drop the emoji', { options: { show_dog: false } }, async ($, on) => {
+  const { ran } = world(on, limit)
+  await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
+
+  await $.command.run(slash('test'))
+  expect(ran[0]?.env?.CLAUDE_PLUGIN_OPTION_SHOW_DOG).toBe('false')
 })
 
 test('the resume message set in the options reaches the script, which decides what is sent', { options: { resume_text: ' carry on ' } }, async ($, on) => {
@@ -349,7 +365,7 @@ test('the resume message set in the options reaches the script, which decides wh
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
   await $.command.run(slash('topic'))
-  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: 'carry on' })
+  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: 'carry on', CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true' })
 })
 
 test('the message is read from the script when it fires: a change made while waiting is the one sent', async ($, on) => {

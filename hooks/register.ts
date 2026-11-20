@@ -13,6 +13,7 @@ let resumeOption = ''
 let quietHours = ''
 let topicOption = ''
 let tokenOption = ''
+let dogOption = ''
 let skipWhileTyping = true
 let timer: Timer | undefined
 let isWaitingForTyping = false
@@ -32,6 +33,7 @@ const scriptEnv = () => ({
   ...(topicOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: topicOption }),
   ...(tokenOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_NTFY_TOKEN: tokenOption }),
   ...(resumeOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_RESUME_TEXT: resumeOption }),
+  ...(dogOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_SHOW_DOG: dogOption }),
 })
 
 const goonWith = ($: EngineInterface, args: string[]) =>
@@ -158,6 +160,7 @@ export const register: Register = (on, options) => {
   quietHours = String(options.quiet_hours ?? '')
   topicOption = String(options.ntfy_topic ?? '').trim()
   tokenOption = String(options.ntfy_token ?? '').trim()
+  dogOption = String(options.show_dog ?? '').trim()
   skipWhileTyping = options.skip_while_typing !== false
 
   on('session.start', async ($, e, next) => {

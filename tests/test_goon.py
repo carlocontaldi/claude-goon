@@ -177,6 +177,11 @@ class PendingTest(WithDirs):
         self.assertIn('dropping an unreadable pending record bad.json', '\n'.join(logged.output))
         self.assertFalse(goon.has_pending(100))
 
+    def test_sessions_are_taken_smallest_first_and_one_of_unknown_size_last(self):
+        for session_id, facts in (('big', {'size': 900}), ('unknown', {}), ('small', {'size': 10})):
+            goon.register(100, {**self.record(Path('t.jsonl')), 'session_id': session_id}, facts)
+        self.assertEqual([r['session_id'] for r in goon.take_pending(100)], ['small', 'big', 'unknown'])
+
     def test_registering_survives_the_folder_being_removed_underneath(self):
         real_write = Path.write_text
         calls = []
@@ -435,7 +440,12 @@ class SendTestTest(WithDirs):
         patcher = mock.patch.object(goon, 'NTFY_URL', f'http://127.0.0.1:{self.server.server_port}/')
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.settings = {'ntfy_topic': 'secret-topic', 'notify_email': 'me@example.com', 'ntfy_token': ''}
+        self.settings = {
+            'ntfy_topic': 'secret-topic',
+            'notify_email': 'me@example.com',
+            'ntfy_token': '',
+            'show_dog': '',
+        }
 
     def test_one_push_goes_to_the_topic_without_the_email(self):
         text = goon.send_test(self.settings)
@@ -445,6 +455,11 @@ class SendTestTest(WithDirs):
         self.assertNotIn('Email', headers)
         self.assertEqual((headers['Title'], headers['Tags']), ('Claude Goon test', 'service_dog,bell'))
         self.assertIn(b'the topic works', body)
+
+    def test_with_the_dog_off_the_test_push_drops_the_dog_tag(self):
+        goon.send_test({**self.settings, 'show_dog': 'false'})
+        [(_, headers, _)] = self.server.requests
+        self.assertEqual(headers['Tags'], 'bell')
 
     def test_a_failure_points_at_the_log(self):
         self.server.shutdown()
@@ -752,6 +767,12 @@ class WatchTest(WithFakeClaude):
         self.assertEqual((title_of(headers), headers.get('Tags')), (RESUMED_TITLE, None))
         self.assertEqual(body, ('5-hour limit reset: resumed 1 closed session.' + SIGNED).encode())
         self.assertEqual(len(self.handover_files('sent')), 1)  # so a note that comes late is known to be covered
+
+    def test_with_the_dog_off_the_title_has_no_emoji(self):
+        with mock.patch.dict(os.environ, {'CLAUDE_PLUGIN_OPTION_SHOW_DOG': 'false'}):
+            goon.watch(self.payload())
+        [(_, headers, _)] = self.server.requests
+        self.assertEqual(title_of(headers), 'Interrupted Claude sessions resumed')
 
     def test_when_portavoce_decided_to_email_first_goon_pushes_without_an_email(self):
         def portavoce_decides(until):
@@ -1525,6 +1546,10 @@ class DetailsTest(unittest.TestCase):
             ('', False),
         ):
             self.assertEqual(goon.wants_details({'push_details': value}), expected, value)
+
+    def test_only_the_listed_words_turn_the_dog_off(self):
+        for value, expected in (('', True), ('true', True), ('false', False), ('OFF', False), ('0', False)):
+            self.assertEqual(goon.shows_dog({'show_dog': value}), expected, value)
 
     def test_a_session_is_named_by_its_title_else_its_folder_and_sessions_nobody_acted_on_are_left_out(self):
         results = [

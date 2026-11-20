@@ -134,7 +134,7 @@ python3 hooks/goon.py plan --session <whole session id>    # what would be sent 
 
 ## Configure
 
-All eight values are optional.
+All nine values are optional.
 
 | Value | Meaning |
 |---|---|
@@ -143,6 +143,7 @@ All eight values are optional.
 | Quiet hours | Off by default. A daily window such as `22:00-07:00` (24 h, this machine's clock) or `22:00-07:00 Europe/Lisbon`, in which nothing is resumed. A limit that resets inside it is acted on when the window ends, for open and closed sessions alike. An invalid window is logged and ignored. |
 | Permission mode for closed sessions | `acceptEdits`, `auto`, `dontAsk`, `plan` or `manual`, for headless resumes. Unset uses your settings, so a default mode of `bypassPermissions` there would apply to the unattended run. Anything else set here, `bypassPermissions` included, is ignored. |
 | Name sessions in notifications | Off by default. When on, the push and email also list each session by title (or folder name) with what Goon did with it, for example `- Fix the importer: resumed`. One setting for all sessions. |
+| Show the dog emoji | On by default. The push and email titles start with 🐕‍🦺; off gives plain titles, and the `/goon test` push loses its dog tag. The question chip and toasts inside a session keep the emoji. |
 | ntfy topic | Optional. Empty: a private topic Goon makes, `claude-goon-<random>` (see below). Set a name to use your own. |
 | Notification email | Also have ntfy email the summary. |
 | ntfy access token | Needed only for the email: ntfy.sh refuses emails from anonymous requests. |
@@ -151,7 +152,7 @@ All eight values are optional.
 
 A closed session that reaches a permission prompt is paused, not refused: Goon keeps the prompt open and pushes `A resumed session is waiting on a permission prompt for <tool>.` (with *Name sessions in notifications* on, `"<title>"` replaces `A resumed session`). The run is ended after 24 hours. Answering the prompt from Goon is not built yet. With an email set, Goon sends one email per limit reset, titled `🐕‍🦺▶️ Interrupted Claude sessions resumed`, and one more for each resumed session that reaches a prompt. Every email ends with the signature `— Claude Goon`; a push to the phone alone does not. When [Claude Portavoce](https://github.com/carlocontaldi/claude-portavoce) is installed with the same email address and its push time is within five seconds of Goon's resume time, the two send one email, from Goon: Portavoce's announcement first, then Goon's summary (`Your 5-hour limit has reset. You can continue. Goon: resumed 2 closed sessions.`), under the title `🐕‍🦺▶️ Claude limit restored, interrupted sessions resumed`. Goon claims the email before it resumes any session, and reads Portavoce's note once the sessions are resumed, waiting up to two minutes for it while Portavoce is known to be coming. When Goon has nothing to report (every session had already continued, or Goon is off), Portavoce sends its own email. If Portavoce decided to send its own first (Goon had not claimed within 10 minutes), Goon pushes without an email. Portavoce still pushes to its own topic, without an email. If the shared folder `~/.claude/meridiana/` cannot be used, Goon logs `no hand-over` and sends its own email. The free ntfy tier allows five emails a day.
 
-What leaves your machine: one HTTPS request to ntfy.sh (or `GOON_NTFY_URL`) per reset, with the topic in the URL, your email and token in headers next to a fixed title that starts with a dog and an arrow emoji (sent as an RFC 2047 encoded word, which ntfy decodes) and the address of the logo on raw.githubusercontent.com (the `Icon` header; the ntfy app on your phone downloads the image, this machine does not), and a one-line body of counts (or the tool's name, for a prompt). No project names, paths or session ids. With *Name sessions in notifications* on, the body also has one line per session (at most eight) with its title or folder name. Claude Code writes the title from your conversation, so it can name a project or a customer, and anyone who knows the topic can read it.
+What leaves your machine: one HTTPS request to ntfy.sh (or `GOON_NTFY_URL`) per reset, with the topic in the URL, your email and token in headers next to a fixed title that starts with a dog and an arrow emoji (none with *Show the dog emoji* off; sent as an RFC 2047 encoded word, which ntfy decodes) and the address of the logo on raw.githubusercontent.com (the `Icon` header; the ntfy app on your phone downloads the image, this machine does not), and a one-line body of counts (or the tool's name, for a prompt). No project names, paths or session ids. With *Name sessions in notifications* on, the body also has one line per session (at most eight) with its title or folder name. Claude Code writes the title from your conversation, so it can name a project or a customer, and anyone who knows the topic can read it.
 
 ## Set up ntfy
 
