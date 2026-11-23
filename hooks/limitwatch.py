@@ -1,5 +1,5 @@
 # Vendored from claude-meridiana: edit it there and run sync.py.
-# body sha256: 77f8bdc587a701fef1063b048d8835af3c61ede2a73064d2c3abb0b297c6ded9
+# body sha256: cd43581c699459984c65034072e55d6233f2d2bb4138594415c28bec4094e899
 """Reading a Claude Code usage-limit error, waiting for its reset and pushing to ntfy; shared by Portavoce and Goon."""
 
 from __future__ import annotations
