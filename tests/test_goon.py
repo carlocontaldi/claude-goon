@@ -499,13 +499,15 @@ class FakeNtfyHandler(http.server.BaseHTTPRequestHandler):
 
 
 FAKE_CLAUDE = """#!/usr/bin/env python3
-import json, os, select, sys
+import json, os, select, sys, time
 record = {'cwd': os.getcwd(), 'argv': sys.argv[1:], 'message': json.loads(sys.stdin.readline())}
 if os.environ.get('FAKE_MODE') == 'prompt':
     request = {'subtype': 'can_use_tool', 'tool_name': 'Write', 'input': {}}
     print(json.dumps({'type': 'control_request', 'request_id': 'r1', 'request': request}), flush=True)
     ready = select.select([sys.stdin], [], [], 0.5)[0]
     record['after'] = sys.stdin.readline() if ready else ''
+elif os.environ.get('FAKE_MODE') == 'hang':
+    time.sleep(10)
 else:
     print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'resumed ok'}), flush=True)
 open(os.environ['FAKE_CALLS'], 'w').write(json.dumps(record))
@@ -578,6 +580,12 @@ class SuperviseTest(WithFakeClaude):
         [(_, headers, body)] = self.server.requests
         self.assertEqual(title_of(headers), '🐕‍🦺 Claude Goon')
         self.assertEqual(body, b'A resumed session is waiting on a permission prompt for Write.')
+
+    @mock.patch.dict(os.environ, {'FAKE_MODE': 'hang'})
+    @mock.patch.object(goon, 'SUPERVISOR_WAIT', 0.1)
+    def test_a_resumed_run_is_killed_after_the_supervisor_timeout(self):
+        code = goon.supervise(self.job(), goon.read_settings())
+        self.assertNotEqual(code, 0)
 
 
 class WatchTest(WithFakeClaude):

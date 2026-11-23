@@ -1,5 +1,5 @@
 # Vendored from claude-meridiana: edit it there and run sync.py.
-# body sha256: cd43581c699459984c65034072e55d6233f2d2bb4138594415c28bec4094e899
+# body sha256: 39aa8fc09b455fe2536fa6e2be6bad951dd577b811516f565276b174a773ff58
 """Reading a Claude Code usage-limit error, waiting for its reset and pushing to ntfy; shared by Portavoce and Goon."""
 
 from __future__ import annotations
@@ -443,7 +443,9 @@ def is_held(path: Path) -> bool:
 def write_new(path: Path, data: dict) -> bool:
     """Create `path` with `data` in one step; False if it already exists."""
     scratch = path.with_name(f'{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp')
-    scratch.write_text(json.dumps(data))
+    fd = os.open(scratch, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(data))
     try:
         os.link(scratch, path)
         return True

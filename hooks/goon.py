@@ -63,6 +63,7 @@ LOOKUP_TRIES = 10  # the limit error may not be in the transcript yet when the h
 TOPIC_PREFIX = 'claude-goon'
 ICON_URL = 'https://raw.githubusercontent.com/carlocontaldi/claude-goon/main/assets/goon-icon-64.png'
 PROMPT_WAIT = 24 * 3600  # seconds a resumed session may sit on a permission prompt before its run is ended
+SUPERVISOR_WAIT = 24 * 3600  # seconds a detached resume may run before it is ended
 PERMISSION_MODES = ('acceptEdits', 'auto', 'dontAsk', 'plan', 'manual')  # never bypassPermissions
 OFF_EXIT = 3  # `power` exit code while off; 1 and 2 are a crash and a usage error. register.ts holds a copy
 
@@ -243,6 +244,8 @@ def supervise(job: dict, settings: dict[str, str]) -> int:
     process.stdin.write(user_message(text))
     process.stdin.flush()
     timer = None
+    run_timer = threading.Timer(SUPERVISOR_WAIT, process.kill)
+    run_timer.start()
     for line in process.stdout:
         try:
             event = json.loads(line)
@@ -265,6 +268,7 @@ def supervise(job: dict, settings: dict[str, str]) -> int:
     process.stdout.close()
     if timer:
         timer.cancel()
+    run_timer.cancel()
     return code
 
 
