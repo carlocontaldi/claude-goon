@@ -1,12 +1,12 @@
 # Vendored from claude-meridiana: edit it there and run sync.py.
-# body sha256: 6cd2596ea40a8a47c30743b598691a05e1b44362281afb999b01ce66fcd72c78
+# body sha256: 39f281b7df7489ed4726bb9774de9d752185b50c834ce97ed68b250280836ede
 """Reading a Claude Code usage-limit error, waiting for its reset and pushing to ntfy; shared by Portavoce and Goon."""
 
 from __future__ import annotations
 
 import base64
 import contextlib
-import fcntl
+import errno
 import hashlib
 import http.client
 import json
@@ -24,6 +24,48 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+if os.name == 'nt':
+    import msvcrt
+
+    # msvcrt locks are mandatory: lock a byte past the content so that other processes can still read the file.
+    LOCK_OFFSET = 1 << 30
+
+    def lock_file(fd: int, *, blocking: bool = True, shared: bool = False) -> None:
+        """Acquire an exclusive lock on `fd` (Windows has no shared one); BlockingIOError when non-blocking and held."""
+        while True:
+            os.lseek(fd, LOCK_OFFSET, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EDEADLK):
+                    raise
+                if not blocking:
+                    raise BlockingIOError(errno.EACCES, 'Resource temporarily unavailable') from error
+                time.sleep(0.05)
+            finally:
+                os.lseek(fd, 0, os.SEEK_SET)
+
+    def unlock_file(fd: int) -> None:
+        """Release the lock on `fd`."""
+        with contextlib.suppress(OSError):
+            os.lseek(fd, LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            os.lseek(fd, 0, os.SEEK_SET)
+
+else:
+    import fcntl
+
+    def lock_file(fd: int, *, blocking: bool = True, shared: bool = False) -> None:
+        """Acquire a lock on `fd`, shared if asked; raise BlockingIOError when non-blocking and held."""
+        fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | (0 if blocking else fcntl.LOCK_NB))
+
+    def unlock_file(fd: int) -> None:
+        """Release the lock on `fd` (closing `fd` also releases it on POSIX)."""
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+
+
 MARGIN = timedelta(seconds=60)  # pad past the stated time so nothing happens before the limit has lifted
 RECENT = timedelta(minutes=5)  # a limit error older than this is not the one that stopped the turn
 WINDOW_WAIT = timedelta(days=8)
@@ -36,6 +78,8 @@ HANDOVER_WAIT = 600  # seconds Portavoce waits for Goon to claim or send the mer
 NOTE_WAIT = 120  # seconds Goon waits for a Portavoce that is known to be coming
 SENDING_WAIT = 7200  # seconds Portavoce waits for a Goon that claimed the email to finish resuming and send it
 HANDOVER_POLL = 1
+READ_TRIES = 5  # reads of a hand-over file that Windows refused for a moment
+READ_RETRY = 0.01
 ANCHORS_FILE = 'monthly_anchors.json'
 ANCHORS_LOCK = 'monthly_anchors.lock'
 MAX_ANCHORS = 4  # monthly reset moments kept
@@ -220,7 +264,7 @@ def learn_anchor(reset: datetime) -> None:
     try:
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         with open(folder / ANCHORS_LOCK, 'a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)  # Portavoce and Goon may both learn at once: read inside the lock
+            lock_file(lock.fileno())  # Portavoce and Goon may both learn at once: read inside the lock
             known = load_anchors()
             if moment in known:
                 return
@@ -373,7 +417,7 @@ def claim(marker: Path) -> int | None:
     while True:
         fd = os.open(marker, os.O_CREAT | os.O_WRONLY, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_file(fd, blocking=False)
         except BlockingIOError:
             os.close(fd)
             return None
@@ -382,12 +426,19 @@ def claim(marker: Path) -> int | None:
                 return fd
         except FileNotFoundError:
             pass
+        unlock_file(fd)
         os.close(fd)  # the previous holder deleted the file after we opened it; try again
 
 
 def release(fd: int, marker: Path) -> None:
-    Path(marker).unlink(missing_ok=True)  # while still locked, so a waiting claim() sees the file gone
-    os.close(fd)
+    if os.name == 'nt':
+        unlock_file(fd)
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            Path(marker).unlink(missing_ok=True)
+    else:
+        Path(marker).unlink(missing_ok=True)  # while still locked, so a waiting claim() sees the file gone
+        os.close(fd)
 
 
 def sleep_until(t: datetime) -> None:
@@ -475,7 +526,8 @@ def is_held(path: Path) -> bool:
     except OSError:
         return False
     try:
-        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        lock_file(fd, blocking=False, shared=True)
+        unlock_file(fd)
         return False
     except BlockingIOError:
         return True
@@ -486,14 +538,16 @@ def is_held(path: Path) -> bool:
 def write_new(path: Path, data: dict) -> bool:
     """Create `path` with `data` in one step; False if it already exists."""
     scratch = path.with_name(f'{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp')
-    scratch.write_text(json.dumps(data))
+    with os.fdopen(os.open(scratch, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as f:
+        f.write(json.dumps(data))
     try:
         os.link(scratch, path)
         return True
     except FileExistsError:
         return False
     finally:
-        scratch.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):  # Windows refuses while a reader has the new link open; sweep() clears it
+            scratch.unlink(missing_ok=True)
 
 
 def sweep(folder: Path, age: float = 86400) -> None:
@@ -509,10 +563,16 @@ def sweep(folder: Path, age: float = 86400) -> None:
 
 
 def read_json(path: Path) -> dict | None:
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
+    for attempt in range(READ_TRIES):
+        try:
+            data = json.loads(path.read_text())
+            break
+        except PermissionError:  # Windows refuses for a moment while a writer or a deleter has the file
+            if attempt == READ_TRIES - 1:
+                return None
+            time.sleep(READ_RETRY)
+        except (OSError, ValueError):
+            return None
     return data if isinstance(data, dict) and data.get('v') == HANDOVER_VERSION else None
 
 
@@ -534,7 +594,7 @@ class Held:
         sweep(self.folder)
         self.clear()
         self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        lock_file(self.fd)
         os.ftruncate(self.fd, 0)
         plan = {'v': HANDOVER_VERSION, 'at': int(self.at.timestamp()), 'email': self.email}
         os.write(self.fd, json.dumps(plan).encode())
@@ -574,7 +634,10 @@ class Offer(Held):
 
     def clear(self) -> None:
         for leftover in (self.note, self.verdict, self.sent):
-            leftover.unlink(missing_ok=True)  # the verdict and the sent mark of a watcher that ended stay until then
+            with contextlib.suppress(OSError):  # Windows refuses while a reader has it; sweep() clears it later
+                leftover.unlink(
+                    missing_ok=True
+                )  # the verdict and the sent mark of a watcher that ended stay until then
 
     def read_note(self) -> tuple[list[Cap], list[Cap]] | None:
         """The caps Portavoce left to announce: those that reset, and those still in force."""
@@ -698,7 +761,8 @@ def negotiate(
         if not alive or time.monotonic() >= deadline:
             took = write_new(verdict, {'v': HANDOVER_VERSION, 'by': 'portavoce'})
             if took or owner is not None or not alive:
-                note.unlink(missing_ok=True)
+                with contextlib.suppress(OSError):  # Windows refuses while Goon reads it; sweep() clears it later
+                    note.unlink(missing_ok=True)
                 log('Goon did not send the announcement')
                 return False
         else:

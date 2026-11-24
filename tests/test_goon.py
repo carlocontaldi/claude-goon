@@ -8,6 +8,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from collections import Counter
 from contextlib import ExitStack
@@ -80,12 +81,17 @@ def together(*managers):
     return stack
 
 
+UNDER_WINE = bool(os.environ.get('UNDER_WINE'))  # set by ~/tools/wine-py
+KILL_REASON = "Wine's taskkill does not end a process tree"
+
+
 class WithDirs(unittest.TestCase):
     """A scratch Goon dir, Claude dir and cwd, with the module pointed at them."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
+        self.addCleanup(self.close_log_handlers, list(goon.logger.handlers))
         self.root = Path(tmp.name)
         self.claude = self.root / 'claude'
         (self.claude / 'sessions').mkdir(parents=True)
@@ -97,6 +103,13 @@ class WithDirs(unittest.TestCase):
             patcher = mock.patch.object(goon, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def close_log_handlers(before):
+        """Windows cannot delete a log file that is still open."""
+        for handler in [h for h in goon.logger.handlers if h not in before]:
+            goon.logger.removeHandler(handler)
+            handler.close()
 
     def transcript(self, *rows):
         path = self.root / 'transcript.jsonl'
@@ -142,9 +155,25 @@ class IsOpenTest(WithDirs):
         self.assertTrue(limits.is_open(SESSION, self.claude / 'sessions'))
 
     @unittest.skipUnless(Path('/proc/self/stat').exists(), 'needs /proc')
+    @unittest.skipIf(os.name == 'nt', 'Windows compares process creation times instead')
     def test_a_pid_reused_by_another_process_is_not_the_session(self):
         self.open_session(procStart='1')
         self.assertFalse(limits.is_open(SESSION, self.claude / 'sessions'))
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows tells a reused pid apart by when its process was created')
+    def test_a_process_created_after_the_session_began_is_not_the_session(self):
+        self.open_session(startedAt=int(time.time() * 1000) - 3_600_000)
+        self.assertFalse(limits.is_open(SESSION, self.claude / 'sessions'))
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows tells a reused pid apart by when its process was created')
+    def test_the_process_that_began_the_session_is_recognised_by_its_creation_time(self):
+        self.open_session(startedAt=int(time.time() * 1000))
+        self.assertTrue(limits.is_open(SESSION, self.claude / 'sessions'))
+
+    def test_a_process_created_later_than_the_session_and_its_registry_lag_is_a_reused_pid(self):
+        self.assertTrue(limits.started_after(1_000_000 + limits.REGISTRY_LAG_MS + 1, 1_000_000))
+        self.assertFalse(limits.started_after(1_000_000 + limits.REGISTRY_LAG_MS, 1_000_000))
+        self.assertFalse(limits.started_after(999_000, 1_000_000))
 
     def test_another_session_does_not_count(self):
         self.open_session(session_id='other')
@@ -514,13 +543,18 @@ class FakeNtfyHandler(http.server.BaseHTTPRequestHandler):
 
 
 FAKE_CLAUDE = """#!/usr/bin/env python3
-import json, os, select, sys
+import json, os, sys, threading, time
 record = {'cwd': os.getcwd(), 'argv': sys.argv[1:], 'message': json.loads(sys.stdin.readline())}
 if os.environ.get('FAKE_MODE') == 'prompt':
     request = {'subtype': 'can_use_tool', 'tool_name': 'Write', 'input': {}}
     print(json.dumps({'type': 'control_request', 'request_id': 'r1', 'request': request}), flush=True)
-    ready = select.select([sys.stdin], [], [], 0.5)[0]
-    record['after'] = sys.stdin.readline() if ready else ''
+    line = []
+    reader = threading.Thread(target=lambda: line.append(sys.stdin.readline()), daemon=True)
+    reader.start()
+    reader.join(0.5)
+    record['after'] = line[0] if line else ''
+elif os.environ.get('FAKE_MODE') == 'hang':
+    time.sleep(10)
 else:
     print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'resumed ok'}), flush=True)
 open(os.environ['FAKE_CALLS'], 'w').write(json.dumps(record))
@@ -539,7 +573,11 @@ class WithFakeClaude(WithDirs):
         self.calls = self.root / 'claude-calls.json'
         fake = self.root / 'fake-claude'
         fake.write_text(FAKE_CLAUDE)
-        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        if os.name == 'nt':  # Windows runs a batch file, not a script with a shebang
+            fake = fake.with_suffix('.cmd')
+            fake.write_text(f'@"{sys.executable}" "{fake.with_suffix("")}" %*\n')
+        else:
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         env = {
             'GOON_CLAUDE': str(fake),
             'FAKE_CALLS': str(self.calls),
@@ -582,6 +620,7 @@ class SuperviseTest(WithFakeClaude):
         goon.supervise(self.job(), {**goon.read_settings(), 'resume_text': ''})
         self.assertEqual(json.loads(self.calls.read_text())['message']['message']['content'], choices.DEFAULT_MESSAGE)
 
+    @unittest.skipIf(UNDER_WINE, KILL_REASON)
     @mock.patch.dict(os.environ, {'FAKE_MODE': 'prompt'})
     @mock.patch.object(goon, 'PROMPT_WAIT', 1)
     def test_a_permission_prompt_is_held_and_reported_not_answered(self):
@@ -593,6 +632,37 @@ class SuperviseTest(WithFakeClaude):
         [(_, headers, body)] = self.server.requests
         self.assertEqual(title_of(headers), '🐕‍🦺 Claude Goon')
         self.assertEqual(body, b'A resumed session is waiting on a permission prompt for Write.')
+
+    @unittest.skipIf(UNDER_WINE, KILL_REASON)
+    @mock.patch.dict(os.environ, {'FAKE_MODE': 'hang'})
+    @mock.patch.object(goon, 'RUN_WAIT', 0.1)
+    def test_a_run_that_never_ends_is_killed_after_the_run_wait(self):
+        self.assertNotEqual(goon.supervise(self.job(), goon.read_settings()), 0)
+
+
+class EndRunTest(unittest.TestCase):
+    def test_a_run_is_killed_outright_off_windows(self):
+        process = mock.Mock(pid=123)
+        with mock.patch.object(goon, 'ON_WINDOWS', False), mock.patch.object(goon.subprocess, 'run') as run:
+            goon.end_run(process)
+        process.kill.assert_called_once_with()
+        run.assert_not_called()
+
+    def test_on_windows_the_whole_tree_of_a_run_is_ended(self):
+        process = mock.Mock(pid=123)
+        with mock.patch.object(goon, 'ON_WINDOWS', True), mock.patch.object(goon.subprocess, 'run') as run:
+            goon.end_run(process)
+        self.assertEqual(run.call_args.args[0], ['taskkill', '/T', '/F', '/PID', '123'])
+        process.kill.assert_called_once_with()
+
+    def test_a_run_is_still_killed_when_taskkill_is_missing(self):
+        process = mock.Mock(pid=123)
+        with (
+            mock.patch.object(goon, 'ON_WINDOWS', True),
+            mock.patch.object(goon.subprocess, 'run', side_effect=FileNotFoundError),
+        ):
+            goon.end_run(process)
+        process.kill.assert_called_once_with()
 
 
 class WatchTest(WithFakeClaude):
@@ -983,6 +1053,7 @@ class HookEntryTest(WithDirs):
     def test_a_subagent_stop_is_ignored(self):
         self.run_hook({'session_id': SESSION, 'agent_id': 'a1'}).assert_not_called()
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX modes')
     def test_the_log_is_readable_by_its_owner_only(self):
         self.run_hook({'session_id': SESSION})
         self.assertEqual((self.dir / 'log.txt').stat().st_mode & 0o777, 0o600)
@@ -1101,6 +1172,7 @@ class ChoicesTest(WithDirs):
         self.assertFalse(choices.session_file(self.dir, SESSION).exists())
         self.assertTrue(choices.is_enabled_for(self.dir, SESSION))
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX modes')
     def test_choices_are_kept_in_a_file_only_the_owner_can_read(self):
         choices.choose(self.dir, SESSION, message='mine')
         self.assertEqual(choices.session_file(self.dir, SESSION).stat().st_mode & 0o777, 0o600)
@@ -1427,6 +1499,7 @@ class SessionChoicesInTheWatcherTest(WithFakeClaude, WithPending):
         [(_, _, body)] = self.server.requests
         self.assertEqual(body, b'5-hour limit reset: resumed 1 closed session.\n- Fix the importer: resumed')
 
+    @unittest.skipIf(UNDER_WINE, KILL_REASON)
     @mock.patch.dict(os.environ, {'CLAUDE_PLUGIN_OPTION_PUSH_DETAILS': 'true', 'FAKE_MODE': 'prompt'})
     @mock.patch.object(goon, 'PROMPT_WAIT', 1)
     def test_a_held_prompt_names_its_session_when_the_option_is_on(self):
@@ -1578,7 +1651,7 @@ class IconTest(unittest.TestCase):
 
 class VendoredTest(unittest.TestCase):
     def test_the_copy_of_limitwatch_matches_the_hash_in_its_header(self):
-        _, header, body = (HOOKS / 'limitwatch.py').read_text().split('\n', 2)
+        _, header, body = (HOOKS / 'limitwatch.py').read_text(encoding='utf-8').split('\n', 2)
         stated = re.search(r'sha256: ([0-9a-f]{64})', header).group(1)
         self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), stated)
 

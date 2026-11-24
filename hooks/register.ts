@@ -28,6 +28,24 @@ const disarm = async ($: EngineInterface, sessionId: string) => {
   await $.store.delete(KEY_PREFIX + sessionId)
 }
 
+// `python3` where it runs, else `python`: a Windows install often has only `python`, a Linux one only `python3`.
+let python: Promise<string> | undefined
+
+const runs = async ($: EngineInterface, name: string) => {
+  try {
+    return (await $.process.run([name, '-c', ''])).exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+const pickPython = async ($: EngineInterface) => {
+  if (await runs($, 'python3')) return 'python3'
+  return (await runs($, 'python')) ? 'python' : 'python3'
+}
+
+const interpreter = ($: EngineInterface) => (python ??= pickPython($))
+
 // The script reads these options from its environment, as it does when a hook runs it.
 const scriptEnv = () => ({
   ...(topicOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: topicOption }),
@@ -37,7 +55,7 @@ const scriptEnv = () => ({
 })
 
 const goonWith = ($: EngineInterface, args: string[]) =>
-  $.process.run(['python3', `${$.plugin.root}/hooks/goon.py`, ...args], { env: scriptEnv() })
+  interpreter($).then(command => $.process.run([command, `${$.plugin.root}/hooks/goon.py`, ...args], { env: scriptEnv() }))
 
 const goon = ($: EngineInterface, ...args: string[]) => goonWith($, args)
 
@@ -156,6 +174,7 @@ const restore = async ($: EngineInterface) => {
 }
 
 export const register: Register = (on, options) => {
+  python = undefined
   resumeOption = String(options.resume_text ?? '').trim()
   quietHours = String(options.quiet_hours ?? '')
   topicOption = String(options.ntfy_topic ?? '').trim()

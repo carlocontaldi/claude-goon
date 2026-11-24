@@ -11,15 +11,25 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04 # setup-python has no 3.9 build for newer images
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15 # a hung test must not hold the build for the default six hours
+    continue-on-error: ${{ matrix.os == 'windows-latest' }} # informational until it has proved stable
     strategy:
       matrix:
-        python-version: ['3.9', '3.13']
+        include:
+          - os: ubuntu-24.04 # setup-python has no 3.9 build for newer images
+            python-version: '3.9'
+          - os: ubuntu-24.04
+            python-version: '3.13'
+          - os: windows-latest
+            python-version: '3.13'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - if: runner.os == 'Windows'
+        run: pip install tzdata # Python on Windows has no time zone database of its own
       - run: python -m unittest discover -s tests
 
   lint:

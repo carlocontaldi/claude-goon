@@ -41,13 +41,17 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
   on('store.keys', () => ({ value: [...store.keys()] }))
   const submitted: string[] = []
   const lookups: string[][] = []
-  const ran: { args: string[]; env?: Record<string, string> }[] = []
+  const ran: { command: string | undefined; args: string[]; env?: Record<string, string> }[] = []
+  const python = { hasPython3: true }
   on('session.id', () => ({ value: 'sess-1' }))
   on('process.run', async (_, e) => {
     const rest = e.argv.slice(2)
     const result = { stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+    if (e.argv[1] === '-c') {
+      return { value: { ...result, exitCode: e.argv[0] === 'python3' && !python.hasPython3 ? 127 : 0, stdout: '' } }
+    }
     if (rest[0] === 'topic' || rest[0] === 'test') {
-      ran.push({ args: rest, env: e.init?.env })
+      ran.push({ command: e.argv[0], args: rest, env: e.init?.env })
       return { value: { ...result, exitCode: 0, stdout: `ran ${rest.join(' ')}\n` } }
     }
     if (rest[0] === 'plan') {
@@ -95,7 +99,7 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
   on('turn.start', () => ({ turnId: 't2' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: 'sess-1' }))
-  return { clock, store, submitted, lookups, draft, power, ran, plan, asked, toasts, answers, commands, tracked, askDelay }
+  return { clock, store, submitted, lookups, draft, power, python, ran, plan, asked, toasts, answers, commands, tracked, askDelay }
 }
 
 const reply = (resumeAt: number) => JSON.stringify({ resetAt: RESET / 1000, resumeAt: resumeAt / 1000, window: 'five_hour' })
@@ -326,6 +330,22 @@ test('/goon topic, topic new and test run the script and show what it says', asy
   expect((await $.command.run(slash(' test '))).text).toBe('ran test')
   expect(ran.map(run => run.args)).toEqual([['topic'], ['topic', 'new'], ['test']])
   expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT, CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true' })
+})
+
+test('the script runs under python3 when it runs', async ($, on) => {
+  const { ran } = world(on, limit)
+  await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
+  await $.command.run(slash('topic'))
+  expect(ran.map(run => run.command)).toEqual(['python3'])
+})
+
+test('the script runs under python when python3 does not', async ($, on) => {
+  const { ran, python } = world(on, limit)
+  python.hasPython3 = false
+  await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
+  await $.command.run(slash('topic'))
+  await $.command.run(slash('test'))
+  expect(ran.map(run => run.command)).toEqual(['python', 'python'])
 })
 
 test('a topic set in the options reaches the script', { options: { ntfy_topic: ' my-topic ' } }, async ($, on) => {

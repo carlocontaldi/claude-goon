@@ -53,9 +53,50 @@ def session_info(path: Path) -> dict:
     return {key: value for key, value in facts.items() if value is not None}
 
 
+# A Windows file time counts 100 ns from 1601; the registry's `startedAt` counts ms from 1970.
+FILETIME_AT_EPOCH = 116444736000000000
+REGISTRY_LAG_MS = 60_000
+
+
+def started_after(created_ms: float, session_started_ms: float) -> bool:
+    """Whether a process was created after the session began, beyond the lag of writing the registry: a reused pid."""
+    return created_ms > session_started_ms + REGISTRY_LAG_MS
+
+
+def is_running_on_windows(pid: int, session_started_ms: object) -> bool:
+    """Whether `pid` is a live process created no later than the session began."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE, *[ctypes.POINTER(wintypes.FILETIME)] * 4]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:  # STILL_ACTIVE
+            return False
+        if not isinstance(session_started_ms, (int, float)):
+            return True
+        created, unused = wintypes.FILETIME(), wintypes.FILETIME()
+        if not kernel32.GetProcessTimes(handle, ctypes.byref(created), *[ctypes.byref(unused)] * 3):
+            return True
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        return not started_after((ticks - FILETIME_AT_EPOCH) / 10_000, session_started_ms)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def is_running(info: dict) -> bool:
     """Whether the registry entry's process is alive and still the one that started: a reused pid is not."""
     pid = int(info['pid'])
+    if os.name == 'nt':
+        return is_running_on_windows(pid, info.get('startedAt'))
     os.kill(pid, 0)
     started = info.get('procStart')
     try:

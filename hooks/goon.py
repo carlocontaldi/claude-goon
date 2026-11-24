@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -64,6 +65,8 @@ LOOKUP_TRIES = 10  # the limit error may not be in the transcript yet when the h
 TOPIC_PREFIX = 'claude-goon'
 ICON_URL = 'https://raw.githubusercontent.com/carlocontaldi/claude-goon/main/assets/goon-icon-64.png'
 PROMPT_WAIT = 24 * 3600  # seconds a resumed session may sit on a permission prompt before its run is ended
+RUN_WAIT = 24 * 3600  # seconds a resumed run may last, prompt or not, before it is ended
+ON_WINDOWS = os.name == 'nt'
 PERMISSION_MODES = ('acceptEdits', 'auto', 'dontAsk', 'plan', 'manual')  # never bypassPermissions
 OFF_EXIT = 3  # `power` exit code while off; 1 and 2 are a crash and a usage error. register.ts holds a copy
 
@@ -229,6 +232,14 @@ def user_message(text: str) -> str:
     return json.dumps({'type': 'user', 'message': {'role': 'user', 'content': text}}) + '\n'
 
 
+def end_run(process: subprocess.Popen) -> None:
+    """Kill a resumed run, on Windows with the processes it started (`claude.cmd` is a shim around claude)."""
+    if ON_WINDOWS:
+        with contextlib.suppress(OSError):
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(process.pid)], capture_output=True, check=False)
+    process.kill()
+
+
 def supervise(job: dict, settings: dict[str, str]) -> int:
     """Run one headless resume to its end, holding a permission prompt open rather than answering it."""
     name = job['session_id'][:8]
@@ -243,6 +254,7 @@ def supervise(job: dict, settings: dict[str, str]) -> int:
             stdout=subprocess.PIPE,
             stderr=out,
             text=True,
+            encoding='utf-8',  # the locale's codec (cp1252 on Windows) cannot read what claude writes
         )
     finally:
         os.close(out)
@@ -250,6 +262,9 @@ def supervise(job: dict, settings: dict[str, str]) -> int:
     process.stdin.write(user_message(text))
     process.stdin.flush()
     timer = None
+    run_timer = threading.Timer(RUN_WAIT, end_run, [process])
+    run_timer.daemon = True
+    run_timer.start()
     for line in process.stdout:
         try:
             event = json.loads(line)
@@ -262,7 +277,7 @@ def supervise(job: dict, settings: dict[str, str]) -> int:
                 logger.info('%s: waiting on a permission prompt for %s', name, tool)
                 who = f'"{job["label"]}"' if job.get('label') and wants_details(settings) else 'A resumed session'
                 push(f'{who} is waiting on a permission prompt for {tool}.', settings, PROMPT_TITLE)
-                timer = threading.Timer(PROMPT_WAIT, process.kill)
+                timer = threading.Timer(PROMPT_WAIT, end_run, [process])
                 timer.start()
         elif event.get('type') == 'result':
             logger.info('%s: finished: %s', name, str(event.get('result'))[:120])
@@ -270,6 +285,7 @@ def supervise(job: dict, settings: dict[str, str]) -> int:
     process.stdin.close()  # the engine waits for more input after a result, and exits on its end
     code = process.wait()
     process.stdout.close()
+    run_timer.cancel()
     if timer:
         timer.cancel()
     return code
@@ -718,12 +734,17 @@ def print_reset(session_id: str, quiet_hours: str) -> None:
 
 
 def spawn_detached(mode: str, payload: bytes) -> None:
+    kwargs: dict[str, object] = (
+        {'creationflags': subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
+        if os.name == 'nt'
+        else {'start_new_session': True}
+    )
     child = subprocess.Popen(
         [sys.executable, os.path.abspath(__file__), mode],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        **kwargs,
     )
     child.stdin.write(payload)
     child.stdin.close()
