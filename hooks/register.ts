@@ -7,13 +7,11 @@ const OFF_EXIT = 3 // goon.py's exit code for "switched off"; any other failure 
 const RETRY_MS = 60_000
 const PAGE = 4 // the dialog shows 2 to 4 options and takes anything typed under its Other
 const MORE = 'More presets…'
+const HOOK_TIMEOUT_MS = 20_000
 const DOG = '🐕‍🦺' // Goon's mark, in front of what it shows the person
 
-let resumeOption = ''
 let quietHours = ''
-let topicOption = ''
-let tokenOption = ''
-let dogOption = ''
+let optionEnv: Record<string, string> = {}
 let skipWhileTyping = true
 let timer: Timer | undefined
 let isWaitingForTyping = false
@@ -46,16 +44,12 @@ const pickPython = async ($: EngineInterface) => {
 
 const interpreter = ($: EngineInterface) => (python ??= pickPython($))
 
-// The script reads these options from its environment, as it does when a hook runs it.
-const scriptEnv = () => ({
-  ...(topicOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: topicOption }),
-  ...(tokenOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_NTFY_TOKEN: tokenOption }),
-  ...(resumeOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_RESUME_TEXT: resumeOption }),
-  ...(dogOption === '' ? {} : { CLAUDE_PLUGIN_OPTION_SHOW_DOG: dogOption }),
-})
-
-const goonWith = ($: EngineInterface, args: string[]) =>
-  interpreter($).then(command => $.process.run([command, `${$.plugin.root}/hooks/goon.py`, ...args], { env: scriptEnv() }))
+// The script reads the options from its environment, as it does when Claude Code runs it as a hook.
+const goonWith = async ($: EngineInterface, args: string[], stdin?: string) =>
+  $.process.run([await interpreter($), `${$.plugin.root}/hooks/goon.py`, ...args], {
+    env: optionEnv,
+    ...(stdin === undefined ? {} : { stdin, timeoutMs: HOOK_TIMEOUT_MS }),
+  })
 
 const goon = ($: EngineInterface, ...args: string[]) => goonWith($, args)
 
@@ -175,12 +169,20 @@ const restore = async ($: EngineInterface) => {
 
 export const register: Register = (on, options) => {
   python = undefined
-  resumeOption = String(options.resume_text ?? '').trim()
   quietHours = String(options.quiet_hours ?? '')
-  topicOption = String(options.ntfy_topic ?? '').trim()
-  tokenOption = String(options.ntfy_token ?? '').trim()
-  dogOption = String(options.show_dog ?? '').trim()
+  optionEnv = Object.fromEntries(
+    Object.entries(options).flatMap(([name, value]) => {
+      const text = String(value ?? '').trim()
+      return text === '' ? [] : [[`CLAUDE_PLUGIN_OPTION_${name.toUpperCase()}`, text]]
+    }),
+  )
   skipWhileTyping = options.skip_while_typing !== false
+
+  // The StopFailure hook runs here, as a module hook, and not as a shell command: no particular shell is needed.
+  on('classic.StopFailure', async ($, e, next) => {
+    if (e.error === 'rate_limit') await goonWith($, [], JSON.stringify(e)).catch(() => undefined)
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('session.start', async ($, e, next) => {
     await $.command.register({

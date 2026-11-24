@@ -20,7 +20,7 @@ A Claude Code plugin that tells interrupted sessions to go on. When a usage limi
 Two halves share the work, so a session is brought back whether or not its window is still open:
 
 - **Open sessions.** A mod inside the session notices the limit, arms a timer for the reset time plus a minute, and submits the resume message into the same session and panel. If the prompt box holds a draft at that moment, it waits and checks again every 30 seconds. A newer turn (you, or the built-in `/rate-limit-options` wait) cancels it. The resume time is stored, so a session reopened before then is re-armed.
-- **Closed sessions.** A `StopFailure` hook starts a detached watcher per reset time. At reset plus a minute it checks each interrupted session: still ending in the limit error, and no running Claude Code process holding it. Those it resumes headless, one every 15 seconds, with `claude --resume <id>` over stream-json, in the session's own directory. Sessions already continued are left alone, and so are open ones, which belong to the mod inside them.
+- **Closed sessions.** The plugin's `classic.StopFailure` module hook (it acts on the `rate_limit` error) starts a detached watcher per reset time. At reset plus a minute it checks each interrupted session: still ending in the limit error, and no running Claude Code process holding it. Those it resumes headless, one every 15 seconds, with `claude --resume <id>` over stream-json, in the session's own directory. Sessions already continued are left alone, and so are open ones, which belong to the mod inside them.
 
 The watcher then pushes one line to a private ntfy topic naming the limit, such as `5-hour limit reset: resumed 2 closed sessions, 1 open session left to the Goon mod inside.`
 
@@ -30,7 +30,7 @@ Claude Code 2.1.319 also has a built-in wait (`/rate-limit-options`, "Wait here,
 
 ## Requirements
 
-- Linux, macOS, or Windows (uses `fcntl.flock` on POSIX and `msvcrt.locking` on Windows; CI gates on Linux only, its Windows leg is informational), Python 3.9 or newer with the standard library only, and `claude` on the machine. The hooks and slash commands run `python3`, or `python` when there is no working `python3`. The hook line is shell script, so on Windows it needs Git for Windows, which is Claude Code's default hook shell there; PowerShell cannot read it. Python on Windows has no time zone database: there, `pip install tzdata`; without it a reset stated in a named zone is not understood.
+- Linux, macOS, or Windows (uses `fcntl.flock` on POSIX and `msvcrt.locking` on Windows; CI gates on Linux only, its Windows leg is informational), Python 3.9 or newer with the standard library only, and `claude` on the machine. The StopFailure hook is part of the plugin's module, so it runs no shell command and needs no particular shell; it and the slash commands run `python3`, or `python` when there is no working `python3`. Python on Windows has no time zone database: there, `pip install tzdata`; without it a reset stated in a named zone is not understood.
 - To read whether a session is open, the watcher lists `~/.claude/sessions/*.json`, a registry Claude Code keeps but does not document. If it cannot be read, closed sessions are skipped and logged rather than guessed at.
 
 ## Install

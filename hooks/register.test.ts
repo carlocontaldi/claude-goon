@@ -43,12 +43,18 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
   const lookups: string[][] = []
   const ran: { command: string | undefined; args: string[]; env?: Record<string, string> }[] = []
   const python = { hasPython3: true }
+  const hooked: string[] = []
   on('session.id', () => ({ value: 'sess-1' }))
+  on('classic.StopFailure', () => ({}))
   on('process.run', async (_, e) => {
     const rest = e.argv.slice(2)
     const result = { stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
     if (e.argv[1] === '-c') {
       return { value: { ...result, exitCode: e.argv[0] === 'python3' && !python.hasPython3 ? 127 : 0, stdout: '' } }
+    }
+    if (rest.length === 0) {
+      hooked.push(e.init?.stdin ?? '')
+      return { value: { ...result, exitCode: 0, stdout: '' } }
     }
     if (rest[0] === 'topic' || rest[0] === 'test') {
       ran.push({ command: e.argv[0], args: rest, env: e.init?.env })
@@ -99,7 +105,7 @@ const world = (on: Parameters<typeof mock.clock>[0], stdout: string, entries: Re
   on('turn.start', () => ({ turnId: 't2' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: 'sess-1' }))
-  return { clock, store, submitted, lookups, draft, power, python, ran, plan, asked, toasts, answers, commands, tracked, askDelay }
+  return { clock, store, submitted, lookups, draft, power, python, hooked, ran, plan, asked, toasts, answers, commands, tracked, askDelay }
 }
 
 const reply = (resumeAt: number) => JSON.stringify({ resetAt: RESET / 1000, resumeAt: resumeAt / 1000, window: 'five_hour' })
@@ -329,7 +335,7 @@ test('/goon topic, topic new and test run the script and show what it says', asy
   expect((await $.command.run(slash('topic new'))).text).toBe('ran topic new')
   expect((await $.command.run(slash(' test '))).text).toBe('ran test')
   expect(ran.map(run => run.args)).toEqual([['topic'], ['topic', 'new'], ['test']])
-  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT, CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true' })
+  expect(ran[0]?.env).toMatchObject({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT, CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true' })
 })
 
 test('the script runs under python3 when it runs', async ($, on) => {
@@ -353,7 +359,7 @@ test('a topic set in the options reaches the script', { options: { ntfy_topic: '
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
   await $.command.run(slash('topic'))
-  expect(ran[0]?.env).toEqual({
+  expect(ran[0]?.env).toMatchObject({
     CLAUDE_PLUGIN_OPTION_NTFY_TOPIC: 'my-topic',
     CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT,
     CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true',
@@ -365,7 +371,7 @@ test('the access token set in the options reaches the script, so /goon test is s
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
   await $.command.run(slash('test'))
-  expect(ran[0]?.env).toEqual({
+  expect(ran[0]?.env).toMatchObject({
     CLAUDE_PLUGIN_OPTION_NTFY_TOKEN: 'tk_fake',
     CLAUDE_PLUGIN_OPTION_RESUME_TEXT: TEXT,
     CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true',
@@ -385,7 +391,7 @@ test('the resume message set in the options reaches the script, which decides wh
   await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
 
   await $.command.run(slash('topic'))
-  expect(ran[0]?.env).toEqual({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: 'carry on', CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true' })
+  expect(ran[0]?.env).toMatchObject({ CLAUDE_PLUGIN_OPTION_RESUME_TEXT: 'carry on', CLAUDE_PLUGIN_OPTION_SHOW_DOG: 'true' })
 })
 
 test('the message is read from the script when it fires: a change made while waiting is the one sent', async ($, on) => {
@@ -548,4 +554,25 @@ test('an error that is no usage limit is not tracked', async ($, on) => {
   await $.turn.complete(stopped)
   await clock.settle()
   expect(tracked).toEqual([])
+})
+
+test('a rate-limit stop runs the script with the hook input on its stdin', async ($, on) => {
+  const { hooked } = world(on, limit)
+  await $.classic.StopFailure({ error: 'rate_limit', session_id: 's1', transcript_path: '/t.jsonl' })
+  expect(hooked).toHaveLength(1)
+  expect(JSON.parse(hooked[0] ?? '{}')).toMatchObject({ error: 'rate_limit', session_id: 's1', transcript_path: '/t.jsonl' })
+})
+
+test('a stop that is no rate limit runs nothing', async ($, on) => {
+  const { hooked } = world(on, limit)
+  await $.classic.StopFailure({ error: 'overloaded', session_id: 's1', transcript_path: '/t.jsonl' })
+  expect(hooked).toEqual([])
+})
+
+test('a script that cannot run does not stop the session', async ($, on) => {
+  on('classic.StopFailure', () => ({}))
+  on('process.run', () => {
+    throw new Error('no such file')
+  })
+  await $.classic.StopFailure({ error: 'rate_limit', session_id: 's1', transcript_path: '/t.jsonl' })
 })
