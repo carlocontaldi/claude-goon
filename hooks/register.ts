@@ -35,7 +35,7 @@ const scriptEnv = () => ({
 })
 
 const goonWith = ($: EngineInterface, args: string[]) =>
-  $.process.run(['python3', `${$.plugin.root}/hooks/goon.py`, ...args], { env: scriptEnv() })
+  $.process.run(['python', `${$.plugin.root}/hooks/goon.py`, ...args], { env: scriptEnv() })
 
 const goon = ($: EngineInterface, ...args: string[]) => goonWith($, args)
 

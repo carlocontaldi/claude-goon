@@ -1,15 +1,20 @@
 # Vendored from claude-meridiana: edit it there and run sync.py.
-# body sha256: 39aa8fc09b455fe2536fa6e2be6bad951dd577b811516f565276b174a773ff58
+# body sha256: 69c117d0dd14bc9797f5354a913149843b2f5856b6e39c3f9f62b21019fd695b
 """Reading a Claude Code usage-limit error, waiting for its reset and pushing to ntfy; shared by Portavoce and Goon."""
 
 from __future__ import annotations
 
 import base64
-import fcntl
+import os
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+if os.name == 'nt':
+    import msvcrt
 import hashlib
 import http.client
 import json
-import os
 import re
 import secrets
 import string
@@ -328,14 +333,29 @@ def subscribe_steps(topic: str, test_command: str) -> str:
 def claim(marker: Path) -> int | None:
     """Lock the marker for one reset time and return its fd; None if a live watcher holds it."""
     while True:
-        fd = os.open(marker, os.O_CREAT | os.O_WRONLY, 0o600)
+        lock_path = Path(str(marker) + '.lock') if os.name == 'nt' else marker
+        if os.name == 'nt' and not lock_path.exists():
+            try:
+                fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.write(fd, b'\0')
+                os.close(fd)
+            except FileExistsError:
+                pass
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            fd = os.open(lock_path, os.O_RDWR)
+        except FileNotFoundError:
+            continue
+        try:
+            if os.name == 'nt':
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
             os.close(fd)
             return None
         try:
-            if os.fstat(fd).st_ino == Path(marker).stat().st_ino:
+            if os.name == 'nt' or os.fstat(fd).st_ino == Path(marker).stat().st_ino:
                 return fd
         except FileNotFoundError:
             pass
@@ -343,8 +363,15 @@ def claim(marker: Path) -> int | None:
 
 
 def release(fd: int, marker: Path) -> None:
-    Path(marker).unlink(missing_ok=True)  # while still locked, so a waiting claim() sees the file gone
-    os.close(fd)
+    if os.name == 'nt':
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        os.close(fd)
+        Path(str(marker) + '.lock').unlink(missing_ok=True)
+        marker.unlink(missing_ok=True)
+    else:
+        os.close(fd)
+        Path(marker).unlink(missing_ok=True)
 
 
 def sleep_until(t: datetime) -> None:
@@ -427,6 +454,23 @@ def email_key(email: str) -> str:
 
 def is_held(path: Path) -> bool:
     """True while some process holds the lock on `path`."""
+    if os.name == 'nt':
+        sidecar = Path(str(path) + '.lock')
+        if not sidecar.exists():
+            return False
+        try:
+            fd = os.open(sidecar, os.O_RDWR)
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            os.close(fd)
+            return False
+        except (BlockingIOError, OSError):
+            try:
+                os.close(fd)
+            except UnboundLocalError:
+                pass
+            return True
     try:
         fd = os.open(path, os.O_RDONLY)
     except OSError:
@@ -434,7 +478,7 @@ def is_held(path: Path) -> bool:
     try:
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         return False
-    except BlockingIOError:
+    except (BlockingIOError, OSError):
         return True
     finally:
         os.close(fd)
@@ -487,13 +531,26 @@ class Held:
         self.folder = (directory or shared_dir()) / 'handover'
         self.path = self.folder / f'{int(at.timestamp())}{self.suffix}'
         self.fd: int | None = None
+        self.lock_fd: int | None = None
 
     def open(self) -> Held:
-        self.folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            self.folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except FileExistsError as error:
+            raise NotADirectoryError(str(error)) from error
         sweep(self.folder)
         self.clear()
-        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        if os.name == 'nt':
+            self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            lock_path = Path(str(self.path) + '.lock')
+            self.lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            if os.fstat(self.lock_fd).st_size == 0:
+                os.write(self.lock_fd, b'\0')
+            os.lseek(self.lock_fd, 0, os.SEEK_SET)
+            msvcrt.locking(self.lock_fd, msvcrt.LK_LOCK, 1)
+        else:
+            self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
         os.ftruncate(self.fd, 0)
         plan = {'v': HANDOVER_VERSION, 'at': int(self.at.timestamp()), 'email': self.email}
         os.write(self.fd, json.dumps(plan).encode())
@@ -503,7 +560,18 @@ class Held:
         """Remove what a watcher that died left for this time."""
 
     def close(self) -> None:
-        if self.fd is not None:
+        if os.name == 'nt':
+            if self.lock_fd is not None:
+                os.lseek(self.lock_fd, 0, os.SEEK_SET)
+                msvcrt.locking(self.lock_fd, msvcrt.LK_UNLCK, 1)
+                os.close(self.lock_fd)
+                self.lock_fd = None
+                Path(str(self.path) + '.lock').unlink(missing_ok=True)
+            if self.fd is not None:
+                os.close(self.fd)
+                self.fd = None
+            self.path.unlink(missing_ok=True)
+        elif self.fd is not None:
             release(self.fd, self.path)
             self.fd = None
 

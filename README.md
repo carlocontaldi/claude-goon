@@ -30,7 +30,7 @@ Claude Code 2.1.319 also has a built-in wait (`/rate-limit-options`, "Wait here,
 
 ## Requirements
 
-- Linux (the watcher uses `fcntl.flock`), Python 3.9 or newer with the standard library only, and `claude` on the machine. Only Linux is tested.
+- Windows and Linux, Python 3.9 or newer with the standard library only, and `claude` on the machine.
 - To read whether a session is open, the watcher lists `~/.claude/sessions/*.json`, a registry Claude Code keeps but does not document. If it cannot be read, closed sessions are skipped and logged rather than guessed at.
 
 ## Install
@@ -127,9 +127,9 @@ In any session:
 From a shell, in the plugin folder (the same commands, for when every session is stopped):
 
 ```
-python3 hooks/goon.py command list
-python3 hooks/goon.py command session 3f2a message 6
-python3 hooks/goon.py plan --session <whole session id>    # what would be sent now; exit code 3 while off
+python hooks/goon.py command list
+python hooks/goon.py command session 3f2a message 6
+python hooks/goon.py plan --session <whole session id>    # what would be sent now; exit code 3 while off
 ```
 
 ## Configure
@@ -189,7 +189,7 @@ A session is resumed at most five times a day, so one that keeps hitting a limit
 ## Test
 
 ```
-python3 -m unittest discover -s tests
+python -m unittest discover -s tests
 claude plugin test .
 ```
 

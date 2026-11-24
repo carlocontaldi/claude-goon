@@ -526,7 +526,8 @@ class WithFakeClaude(WithDirs):
         self.calls = self.root / 'claude-calls.json'
         fake = self.root / 'fake-claude'
         fake.write_text(FAKE_CLAUDE)
-        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        if os.name != 'nt':
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         env = {
             'GOON_CLAUDE': str(fake),
             'FAKE_CALLS': str(self.calls),
@@ -555,6 +556,7 @@ class WithFakeClaude(WithDirs):
         return {'binary': os.environ['GOON_CLAUDE'], 'session_id': SESSION, 'cwd': str(self.cwd), 'epoch': 1}
 
 
+@unittest.skipIf(os.name == 'nt', 'fake Claude executable scripts require POSIX in this suite')
 class SuperviseTest(WithFakeClaude):
     def test_the_text_goes_in_as_a_user_message_and_the_run_ends_on_its_result(self):
         with self.assertLogs('goon', 'INFO') as logged:
@@ -972,7 +974,8 @@ class HookEntryTest(WithDirs):
 
     def test_the_log_is_readable_by_its_owner_only(self):
         self.run_hook({'session_id': SESSION})
-        self.assertEqual((self.dir / 'log.txt').stat().st_mode & 0o777, 0o600)
+        if os.name != 'nt':
+            self.assertEqual((self.dir / 'log.txt').stat().st_mode & 0o777, 0o600)
 
 
 class ResetCommandTest(WithDirs):
@@ -1561,7 +1564,8 @@ class IconTest(unittest.TestCase):
 
 class VendoredTest(unittest.TestCase):
     def test_the_copy_of_limitwatch_matches_the_hash_in_its_header(self):
-        _, header, body = (HOOKS / 'limitwatch.py').read_text().split('\n', 2)
+        lines = (HOOKS / 'limitwatch.py').read_text().split('\n', 2)
+        _, header, body = lines
         stated = re.search(r'sha256: ([0-9a-f]{64})', header).group(1)
         self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), stated)
 

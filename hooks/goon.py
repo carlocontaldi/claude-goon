@@ -180,9 +180,11 @@ def claude_binary() -> str | None:
         os.environ.get('GOON_CLAUDE'),
         os.environ.get('CLAUDE_CODE_EXECPATH'),
         shutil.which('claude'),
+        shutil.which('claude.exe'),
+        shutil.which('claude.cmd'),
         str(Path.home() / '.local/bin/claude'),
     ):
-        if candidate and os.access(candidate, os.X_OK):
+        if candidate and (os.name == 'nt' or os.access(candidate, os.X_OK)):
             return candidate
     return None
 
@@ -237,6 +239,7 @@ def supervise(job: dict, settings: dict[str, str]) -> int:
             stdout=subprocess.PIPE,
             stderr=out,
             text=True,
+            shell=os.name == 'nt' and str(job['binary']).lower().endswith(('.cmd', '.bat')),
         )
     finally:
         os.close(out)
@@ -713,12 +716,13 @@ def print_reset(session_id: str, quiet_hours: str) -> None:
 
 
 def spawn_detached(mode: str, payload: bytes) -> None:
+    kwargs = {'creationflags': subprocess.DETACHED_PROCESS} if os.name == 'nt' else {'start_new_session': True}
     child = subprocess.Popen(
         [sys.executable, os.path.abspath(__file__), mode],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        **kwargs,
     )
     child.stdin.write(payload)
     child.stdin.close()

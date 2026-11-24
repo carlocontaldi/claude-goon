@@ -8,7 +8,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/goon.py\""
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/goon.py\""
           }
         ]
       }
