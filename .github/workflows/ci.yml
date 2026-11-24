@@ -45,14 +45,20 @@ jobs:
 
   plugin:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: ${{ matrix.claude-code == 'latest' }} # a newer build may break it before a release: informational
+    strategy:
+      matrix:
+        claude-code: ['2.1.286', '2.1.325', 'latest'] # the oldest build whose plugin modules run the hook, the old pin, the newest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --global @anthropic-ai/claude-code@2.1.325
+      - run: npm install --global @anthropic-ai/claude-code@${{ matrix.claude-code }}
       - run: claude plugin validate .
       - run: claude plugin test .
+      - run: python3 tests/e2e_stopfailure.py
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
