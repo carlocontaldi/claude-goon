@@ -103,6 +103,9 @@ class WithDirs(unittest.TestCase):
             patcher = mock.patch.object(goon, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        shared = mock.patch.dict(os.environ, {'MERIDIANA_DIR': str(self.root / 'meridiana')})
+        shared.start()
+        self.addCleanup(shared.stop)
 
     @staticmethod
     def close_log_handlers(before):
@@ -1049,6 +1052,16 @@ class HookEntryTest(WithDirs):
         with mock.patch.object(sys, 'stdin', stdin), mock.patch.object(goon, 'supervise', return_value=0) as supervise:
             goon.main(['run'])
         self.assertEqual(supervise.call_args.args[0], job)
+
+    def test_the_same_stop_delivered_twice_starts_one_watcher(self):
+        stop = {'session_id': SESSION, 'prompt_id': 'p1', 'error': 'rate_limit', 'last_assistant_message': 'resets 3pm'}
+        self.run_hook(stop).assert_called_once()
+        self.run_hook(stop).assert_not_called()
+
+    def test_another_prompt_stopping_starts_another_watcher(self):
+        stop = {'session_id': SESSION, 'prompt_id': 'p1', 'error': 'rate_limit'}
+        self.run_hook(stop).assert_called_once()
+        self.run_hook({**stop, 'prompt_id': 'p2'}).assert_called_once()
 
     def test_a_subagent_stop_is_ignored(self):
         self.run_hook({'session_id': SESSION, 'agent_id': 'a1'}).assert_not_called()

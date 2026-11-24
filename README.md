@@ -47,6 +47,8 @@ From a shell:
 claude plugin install goon --marketplace carlocontaldi/claude-goon
 ```
 
+A hook registered twice, for example by an old `hooks.StopFailure` entry for `goon.py` in `~/.claude/settings.json`, still does its work once: the script remembers each hook input for an hour and ignores a second delivery of it.
+
 ## Switch it on and off
 
 Goon is on by default. In any session, `/goon off` stops it everywhere, `/goon on` starts it again and `/goon status` says which it is. The switch is the file `~/.claude/goon/off`, so it covers every open session and the closed-session watcher until you flip it back. It is read when Goon is about to resume something, so turning it on before a reset still resumes that session, and turning it off stops resumes that have not started. A resume already running is not stopped.

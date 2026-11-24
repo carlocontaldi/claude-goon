@@ -44,6 +44,7 @@ from limitwatch import (
     claim,
     effective_topic,
     format_reset,
+    is_first_delivery,
     lookup,
     release,
     sleep_until,
@@ -816,7 +817,9 @@ def main(argv: list[str]) -> None:
             logger.exception('%s failed', args.mode)
     else:
         raw = sys.stdin.buffer.read()
-        if not json.loads(raw or b'{}').get('agent_id'):  # a subagent's stop: its session's own turn reports the limit
+        if not json.loads(raw or b'{}').get('agent_id') and is_first_delivery(
+            'goon', raw
+        ):  # a subagent's stop is its session's own
             start_watcher(raw)
 
 

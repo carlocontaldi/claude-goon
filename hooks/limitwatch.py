@@ -1,5 +1,5 @@
 # Vendored from claude-meridiana: edit it there and run sync.py.
-# body sha256: 39f281b7df7489ed4726bb9774de9d752185b50c834ce97ed68b250280836ede
+# body sha256: b8386d40d6797c750e75437cf37ea853aea530234ceafc9e3754eb201617c8cd
 """Reading a Claude Code usage-limit error, waiting for its reset and pushing to ntfy; shared by Portavoce and Goon."""
 
 from __future__ import annotations
@@ -560,6 +560,28 @@ def sweep(folder: Path, age: float = 86400) -> None:
                 path.unlink()
         except OSError:
             pass
+
+
+DELIVERY_FIELDS = ('session_id', 'prompt_id', 'error', 'last_assistant_message')
+DELIVERY_MEMORY = 3600  # seconds a delivered hook input is remembered
+
+
+def is_first_delivery(who: str, raw: bytes | str, directory: Path | None = None) -> bool:
+    """True the first time `who` gets this hook input; a second registration of the same hook gets False."""
+    try:
+        payload = json.loads(raw)
+        identity = json.dumps([who, *(payload.get(field) for field in DELIVERY_FIELDS)])
+    except (ValueError, AttributeError):
+        return True
+    folder = (directory or shared_dir()) / 'delivered'
+    mark = folder / hashlib.sha256(identity.encode()).hexdigest()[:32]
+    try:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        sweep(folder, DELIVERY_MEMORY)
+        os.close(os.open(mark, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except OSError as error:
+        return not isinstance(error, FileExistsError) or not folder.is_dir()  # without the folder, do the work
+    return True
 
 
 def read_json(path: Path) -> dict | None:
