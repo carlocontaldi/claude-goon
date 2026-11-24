@@ -370,9 +370,8 @@ def release(fd: int, marker: Path) -> None:
         os.close(fd)
         Path(str(marker) + '.lock').unlink(missing_ok=True)
         marker.unlink(missing_ok=True)
-    else:
-        os.close(fd)
         Path(marker).unlink(missing_ok=True)
+        os.close(fd)
 
 
 def sleep_until(t: datetime) -> None:
