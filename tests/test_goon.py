@@ -616,7 +616,7 @@ class SuperviseTest(WithFakeClaude):
         record = json.loads(self.calls.read_text())
         self.assertEqual(code, 0)
         self.assertEqual(record['message'], {'type': 'user', 'message': {'role': 'user', 'content': 'carry on'}})
-        self.assertEqual(record['cwd'], str(self.cwd.resolve()))
+        self.assertEqual(Path(record['cwd']).resolve(), self.cwd.resolve())  # a Windows temp dir may have a short name
         self.assertIn('finished: resumed ok', '\n'.join(logged.output))
 
     def test_an_unset_text_falls_back_to_the_default(self):
@@ -681,7 +681,7 @@ class WatchTest(WithFakeClaude):
     def test_a_closed_session_is_resumed_in_its_directory_and_the_push_says_so(self):
         goon.watch(self.payload())
         record = json.loads(self.calls.read_text())
-        self.assertEqual(record['cwd'], str(self.cwd.resolve()))
+        self.assertEqual(Path(record['cwd']).resolve(), self.cwd.resolve())  # a Windows temp dir may have a short name
         self.assertEqual(record['argv'][:3], ['--resume', SESSION, '-p'])
         self.assertEqual(record['message']['message']['content'], 'carry on')
         [(path, headers, body)] = self.server.requests
@@ -964,7 +964,9 @@ class WatchTest(WithFakeClaude):
         [(_, headers, body)] = self.server.requests
         self.assertEqual((headers['Email'], title_of(headers)), ('me@example.com', RESUMED_TITLE))
         self.assertEqual(body, ('5-hour limit reset: resumed 1 closed session.' + SIGNED).encode())
-        self.assertIn('no hand-over: NotADirectoryError', '\n'.join(logged.output))
+        self.assertRegex(
+            '\n'.join(logged.output), r'no hand-over: (NotADirectoryError|FileExistsError)'
+        )  # Windows says the latter
 
     def test_a_claim_that_fails_still_resumes_and_sends_goons_own_email(self):
         with self.email_env(), mock.patch.object(goon.Offer, 'claim', side_effect=PermissionError):

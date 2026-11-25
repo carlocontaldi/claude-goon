@@ -1,5 +1,5 @@
 # Vendored from claude-meridiana: edit it there and run sync.py.
-# body sha256: b8386d40d6797c750e75437cf37ea853aea530234ceafc9e3754eb201617c8cd
+# body sha256: 9ce0f12a5e505a3f7329b662aeffa493e7ce8909169d0989e8a1a089ff7cc544
 """Reading a Claude Code usage-limit error, waiting for its reset and pushing to ntfy; shared by Portavoce and Goon."""
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import string
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -610,6 +611,7 @@ class Held:
         self.folder = (directory or shared_dir()) / 'handover'
         self.path = self.folder / f'{int(at.timestamp())}{self.suffix}'
         self.fd: int | None = None
+        self._closing = threading.Lock()
 
     def open(self) -> Held:
         self.folder.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -626,9 +628,10 @@ class Held:
         """Remove what a watcher that died left for this time."""
 
     def close(self) -> None:
-        if self.fd is not None:
-            release(self.fd, self.path)
-            self.fd = None
+        with self._closing:  # two threads closing at once must not release one fd twice
+            fd, self.fd = self.fd, None
+        if fd is not None:
+            release(fd, self.path)
 
     def __enter__(self) -> Held:
         return self.open()
