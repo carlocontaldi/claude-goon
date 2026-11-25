@@ -13,7 +13,6 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15 # a hung test must not hold the build for the default six hours
-    continue-on-error: ${{ matrix.os == 'windows-latest' }} # informational until it has proved stable
     strategy:
       matrix:
         include:
