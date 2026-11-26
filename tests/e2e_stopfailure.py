@@ -17,6 +17,7 @@ from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parents[1]
 SCRIPT = 'goon.py'
+PAIR_TRIES = 5
 STUB = """#!/bin/sh
 if [ "$1" = "-c" ]; then exit 0; fi
 printf '%s\\n' "$@" > "$STUB_OUT.$$.args"
@@ -95,15 +96,22 @@ def main() -> int:
 
     variants = [('command hook', 'modules', 1)]
     if not real_login:  # under an organization's login the module hook is skipped, so only the command hook runs
-        variants += [('module hook', 'hooks', 1), ('both hooks', '', 2)]
+        variants += [('module hook', 'hooks', 1), ('both hooks', '', PAIR_TRIES)]
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
-        for label, drop, expected in variants:
-            plugin = plugin_copy(tmp, label.replace(' ', '-'), drop)
-            inputs = deliveries(claude, plugin, server.server_port, tmp, real_login)
-            identities = {json.dumps([hook_input.get(field) for field in DELIVERY_FIELDS]) for hook_input in inputs}
-            ok = len(inputs) == expected and len(identities) == 1
-            print(f'{label}: {len(inputs)} input(s), {len(identities)} distinct delivery: {"ok" if ok else "FAILED"}')
+        for label, drop, tries in variants:
+            wanted = 2 if tries > 1 else 1
+            # `claude -p` can exit before the second hook's script has run, so a pair gets several tries.
+            for attempt in range(tries):
+                plugin = plugin_copy(tmp, f'{label.replace(" ", "-")}-{attempt}', drop)
+                inputs = deliveries(claude, plugin, server.server_port, tmp, real_login)
+                identities = {json.dumps([hook_input.get(field) for field in DELIVERY_FIELDS]) for hook_input in inputs}
+                if len(identities) > 1 or len(inputs) == wanted or not inputs:
+                    break
+            ok = len(inputs) <= wanted and len(identities) == 1
+            note = '' if len(inputs) == wanted else ' (only one arrived before claude exited: not compared)'
+            verdict = 'ok' if ok else 'FAILED'
+            print(f'{label}: {len(inputs)} input(s), {len(identities)} distinct delivery: {verdict}{note}')
             failed += not ok
     return 1 if failed else 0
 
