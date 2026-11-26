@@ -1,6 +1,6 @@
 {
   "name": "goon",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Resumes the Claude Code sessions a usage limit interrupted, as soon as the limit resets.",
   "author": { "name": "Carlo Contaldi" },
   "license": "MIT",
