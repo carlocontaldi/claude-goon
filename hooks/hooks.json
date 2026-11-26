@@ -1,4 +1,17 @@
 {
   "description": "Resume sessions a usage limit interrupted",
-  "modules": ["./register.ts"]
+  "modules": ["./register.ts"],
+  "hooks": {
+    "StopFailure": [
+      {
+        "matcher": "rate_limit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for p in python3 python; do if \"$p\" -c '' >/dev/null 2>&1; then exec \"$p\" \"${CLAUDE_PLUGIN_ROOT}/hooks/goon.py\"; fi; done; echo 'goon: no working python3 or python on PATH' >&2; exit 1"
+          }
+        ]
+      }
+    ]
+  }
 }

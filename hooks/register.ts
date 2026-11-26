@@ -178,7 +178,8 @@ export const register: Register = (on, options) => {
   )
   skipWhileTyping = options.skip_while_typing !== false
 
-  // The StopFailure hook runs here, as a module hook, and not as a shell command: no particular shell is needed.
+  // Second path for the StopFailure hook, with no shell; Claude Code skips it under an org's cc-plugin-sec-default,
+  // so hooks.json carries the command hook too and the script runs once for both.
   on('classic.StopFailure', async ($, e, next) => {
     if (e.error === 'rate_limit') await goonWith($, [], JSON.stringify(e)).catch(() => undefined)
     return next(e)
